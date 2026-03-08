@@ -1,0 +1,1976 @@
+// ============================================================
+// NY Open Edge + NQ Stats + RL + Willingness — v4.1
+// Reverse-engineered from: tradingview.com/script/rHKslFbO/
+// Merged with NQ Statistical Edges (nqstats.com, 10-20yr data)
+// Pine Script v6 | NQ/MNQ Futures Only | 5m-15m recommended
+//
+// v4.1 Changes vs v4.0:
+//   - Dashboard: fully complete (30+ rows, all signal groups)
+//   - alertcondition() added for all 7 alert types
+//   - NQ Stats Reference Table drawn (bottom-left)
+//   - Rolling accuracy: true N-session ring buffer (rolling_lb respected)
+//   - Master Signal: combined RL + Willingness + Tier + Confluence score
+//   - Dutch comments translated to English throughout
+//   - RL SKIP label: offset from price to avoid overlap
+// ============================================================
+//@version=6
+indicator("NY Open Edge v4.1 | RL + Willingness [NQ Only]", overlay=true,
+     max_bars_back=500, max_lines_count=200,
+     max_labels_count=200, max_boxes_count=100)
+
+// ─────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────
+grp_disp = "═══ Display ═══"
+show_asia        = input.bool(true,  "Asia Box (20:00-02:00 ET)",            group=grp_disp)
+show_london      = input.bool(true,  "London Box (02:00-08:00 ET)",          group=grp_disp)
+show_us          = input.bool(true,  "US Box (08:00-16:00 ET)",              group=grp_disp)
+show_midlines    = input.bool(true,  "Session Midlines",                     group=grp_disp)
+show_dashboard   = input.bool(true,  "Dashboard",                            group=grp_disp)
+dark_theme       = input.bool(true,  "Dark Theme",                           group=grp_disp)
+
+grp_bias = "═══ Bias Levels ═══"
+show_lon_ext     = input.bool(true,  "London H/L Extensions into US",        group=grp_bias)
+show_arrow       = input.bool(true,  "Bias Arrow @ NY Open",                 group=grp_bias)
+show_target      = input.bool(true,  "Median Penetration Target Zone",       group=grp_bias)
+show_sweepmark   = input.bool(true,  "Sweep Markers (H / L labels)",         group=grp_bias)
+show_lon_mid_ext = input.bool(true,  "London Midpoint Extension",            group=grp_bias)
+
+grp_nq = "═══ NQ Stats ═══"
+show_ib          = input.bool(true,  "Initial Balance Box (9:30-10:30 ET)",  group=grp_nq)
+show_ib_ext      = input.bool(true,  "IB Extension Levels (0.5x/1x/1.5x)",  group=grp_nq)
+show_noon        = input.bool(true,  "Noon Curve Zone (11:30-12:30 ET)",     group=grp_nq)
+show_sdev        = input.bool(true,  "Daily SDEV Levels (±0.5/1.0/1.5)",    group=grp_nq)
+sdev_pct         = input.float(1.376,"Daily 1 SDEV % (NQ default=1.376)",   minval=0.3, maxval=5.0, step=0.001, group=grp_nq)
+show_9am         = input.bool(true,  "9AM Hour Continuation Bias Label",    group=grp_nq)
+show_rth_break   = input.bool(true,  "RTH vs pRTH Break Levels",            group=grp_nq)
+show_stat_tbl    = input.bool(true,  "NQ Stats Reference Table (bottom-left)", group=grp_nq)
+
+grp_live = "═══ Live Tracking ═══"
+show_live        = input.bool(true, "Live Sweep Status",                     group=grp_live)
+show_rolling     = input.bool(true, "Rolling Accuracy",                      group=grp_live)
+rolling_lb       = input.int(20,    "Rolling Lookback (sessions)",           minval=5, maxval=100, group=grp_live)
+
+grp_col = "═══ Colors ═══"
+col_asia_c   = input.color(color.new(color.blue,   78), "Asia Box",     group=grp_col)
+col_london_c = input.color(color.new(color.orange, 78), "London Box",   group=grp_col)
+col_us_c     = input.color(color.new(color.gray,   85), "US Box",       group=grp_col)
+col_ib_c     = input.color(color.new(color.teal,   82), "IB Box",       group=grp_col)
+col_noon_c   = input.color(color.new(color.purple, 88), "Noon Zone",    group=grp_col)
+col_bull_c   = input.color(color.lime,                  "Bull Bias",    group=grp_col)
+col_bear_c   = input.color(color.red,                   "Bear Bias",    group=grp_col)
+col_target_c = input.color(color.new(color.yellow, 72), "Target Zone",  group=grp_col)
+col_sdev_c   = input.color(color.new(color.aqua,   65), "SDEV Lines",   group=grp_col)
+
+grp_alert = "═══ Alerts ═══"
+alert_ny_open  = input.bool(true, "NY Open Alert (08:00 ET)",               group=grp_alert)
+alert_sweep    = input.bool(true, "Sweep Alert",                             group=grp_alert)
+alert_failure  = input.bool(true, "Failure Alert (both sides swept)",        group=grp_alert)
+alert_will_go  = input.bool(true, "Willingness GO Alert",                    group=grp_alert)
+
+
+// ─────────────────────────────────────────────────────────────
+// TIME HELPERS  (DST-aware via America/New_York)
+// ─────────────────────────────────────────────────────────────
+tz   = "America/New_York"
+et_h = hour(time, tz)
+et_m = minute(time, tz)
+
+in_asia   = et_h >= 20 or et_h < 2
+in_london = et_h >= 2  and et_h < 8
+in_us     = et_h >= 8  and et_h < 16
+in_ib     = (et_h == 9 and et_m >= 30) or (et_h == 10 and et_m < 30)
+in_noon   = (et_h == 11 and et_m >= 30) or (et_h == 12 and et_m <= 30)
+in_rth    = ((et_h == 9 and et_m >= 30) or et_h >= 10) and et_h < 16
+
+asia_open_bar   = et_h == 20 and et_m == 0
+london_open_bar = et_h == 2  and et_m == 0
+ny_open_bar     = et_h == 8  and et_m == 0
+rth_open_bar    = et_h == 9  and et_m == 30
+ib_close_bar    = et_h == 10 and et_m == 30
+nine_am_bar     = et_h == 9  and et_m == 0
+ten_am_bar      = et_h == 10 and et_m == 0
+us_close_bar    = et_h == 16 and et_m == 0
+
+// ─────────────────────────────────────────────────────────────
+// SESSION HIGH / LOW TRACKING
+// ─────────────────────────────────────────────────────────────
+var float asia_h = na,  var float asia_l = na
+var float lon_h  = na,  var float lon_l  = na
+var float us_h   = na,  var float us_l   = na
+var float ib_h   = na,  var float ib_l   = na
+var float prth_h = na,  var float prth_l = na
+var float crth_h = na,  var float crth_l = na
+
+var float asia_h_lk  = na, var float asia_l_lk  = na
+var float lon_h_lk   = na, var float lon_l_lk   = na
+var float lon_mid_lk = na
+
+var int asia_bi  = na
+var int lon_bi   = na
+var int ny_bi    = na
+var int rth_bi   = na
+
+// ── Asia ──
+if asia_open_bar
+    asia_h  := high
+    asia_l  := low
+    asia_bi := bar_index
+else if in_asia and not asia_open_bar
+    asia_h := math.max(nz(asia_h, high), high)
+    asia_l := math.min(nz(asia_l, low),  low)
+
+// ── London ──
+if london_open_bar
+    asia_h_lk := asia_h
+    asia_l_lk := asia_l
+    lon_h     := high
+    lon_l     := low
+    lon_bi    := bar_index
+else if in_london and not london_open_bar
+    lon_h := math.max(nz(lon_h, high), high)
+    lon_l := math.min(nz(lon_l, low),  low)
+
+// ── US / NY ──
+if ny_open_bar
+    lon_h_lk   := lon_h
+    lon_l_lk   := lon_l
+    lon_mid_lk := (lon_h + lon_l) / 2.0
+    us_h       := high
+    us_l       := low
+    ny_bi      := bar_index
+else if in_us and not ny_open_bar
+    us_h := math.max(nz(us_h, high), high)
+    us_l := math.min(nz(us_l, low),  low)
+
+// ── IB ──
+if rth_open_bar
+    ib_h   := high
+    ib_l   := low
+    rth_bi := bar_index
+    prth_h := crth_h
+    prth_l := crth_l
+    crth_h := high
+    crth_l := low
+else if in_ib and not rth_open_bar
+    ib_h   := math.max(nz(ib_h,   high), high)
+    ib_l   := math.min(nz(ib_l,   low),  low)
+    crth_h := math.max(nz(crth_h, high), high)
+    crth_l := math.min(nz(crth_l, low),  low)
+else if in_rth and not in_ib
+    crth_h := math.max(nz(crth_h, high), high)
+    crth_l := math.min(nz(crth_l, low),  low)
+
+// ─────────────────────────────────────────────────────────────
+// PATTERN CLASSIFICATION
+// P1 = London Engulfs Asia   (25% of days)
+// P2 = Asia Engulfs London   ( 5% of days) — rare, explosive
+// P3 = London Partial Up     (39% of days) — lon_h > asia_h, lon_l >= asia_l
+// P4 = London Partial Down   (31% of days) — lon_l < asia_l, lon_h <= asia_h
+// ─────────────────────────────────────────────────────────────
+var int   pat       = 0
+var bool  above_mid = false
+var float ny_price  = na
+
+classify(ah, al, lh, ll) =>
+    int result = 1
+    if lh > ah and ll < al
+        result := 1
+    else if ah > lh and al < ll
+        result := 2
+    else if lh > ah and ll >= al
+        result := 3
+    else if ll < al and lh <= ah
+        result := 4
+    result
+
+if ny_open_bar
+    pat       := classify(asia_h_lk, asia_l_lk, lon_h_lk, lon_l_lk)
+    above_mid := close > lon_mid_lk
+    ny_price  := close
+
+// ─────────────────────────────────────────────────────────────
+// STATS DATABASE
+// Source: NY Open Edge 5yr (2021-2025, 1283 days)
+//       + nqstats.com ALN 10yr (2015-2025)
+// [hi_pct, lo_pct, med_pen_pts, fail_rate, sample, tier]
+// Tier 1 = dominant ≥75% AND failure <40%
+// Tier 2 = moderate edge, acceptable failure
+// Tier 3 = weak (<65%) OR high failure (≥55%) — use caution
+// ─────────────────────────────────────────────────────────────
+get_stats(p, abv) =>
+    float r_hi  = 58.0
+    float r_lo  = 42.0
+    float r_pen = 35.0
+    float r_fr  = 49.0
+    int   r_n   = 80
+    int   r_t   = 2
+    if p == 1 and abv
+        r_hi  := 58.0
+        r_lo  := 42.0
+        r_pen := 35.0
+        r_fr  := 49.0
+        r_n   := 80
+        r_t   := 2
+    else if p == 1 and not abv
+        r_hi  := 44.0
+        r_lo  := 56.0
+        r_pen := 33.0
+        r_fr  := 49.0
+        r_n   := 241
+        r_t   := 2
+    else if p == 2 and abv
+        r_hi  := 60.0
+        r_lo  := 40.0
+        r_pen := 50.0
+        r_fr  := 42.0
+        r_n   := 30
+        r_t   := 3
+    else if p == 2 and not abv
+        r_hi  := 38.0
+        r_lo  := 62.0
+        r_pen := 55.0
+        r_fr  := 39.0
+        r_n   := 34
+        r_t   := 3
+    else if p == 3 and abv
+        r_hi  := 78.0
+        r_lo  := 22.0
+        r_pen := 45.0
+        r_fr  := 37.0
+        r_n   := 220
+        r_t   := 1
+    else if p == 3 and not abv
+        r_hi  := 55.0
+        r_lo  := 45.0
+        r_pen := 30.0
+        r_fr  := 44.0
+        r_n   := 280
+        r_t   := 2
+    else if p == 4 and abv
+        r_hi  := 47.0
+        r_lo  := 53.0
+        r_pen := 28.0
+        r_fr  := 45.0
+        r_n   := 260
+        r_t   := 2
+    else  // p == 4 below mid — TIER 1 BEAR
+        r_hi  := 18.0
+        r_lo  := 82.0
+        r_pen := 42.0
+        r_fr  := 38.0
+        r_n   := 170
+        r_t   := 1
+    [r_hi, r_lo, r_pen, r_fr, r_n, r_t]
+
+var float s_hi   = na, var float s_lo   = na
+var float s_pen  = na, var float s_fail = na
+var int   s_n    = na, var int   s_tier = na
+
+if ny_open_bar
+    [h, l, mp, fr, sn, tr] = get_stats(pat, above_mid)
+    s_hi   := h
+    s_lo   := l
+    s_pen  := mp
+    s_fail := fr
+    s_n    := sn
+    s_tier := tr
+
+bias_bull = not na(s_hi) and s_hi >= s_lo
+bias_pct  = not na(s_hi) ? (bias_bull ? s_hi : s_lo) : na
+
+
+// ─────────────────────────────────────────────────────────────
+// LIVE SWEEP DETECTION
+// ─────────────────────────────────────────────────────────────
+var bool  hi_swept     = false
+var bool  lo_swept     = false
+var bool  both_swpt    = false
+var float hi_pen       = 0.0
+var float lo_pen       = 0.0
+var bool  hi_sweep_new = false
+var bool  lo_sweep_new = false
+
+if ny_open_bar
+    hi_swept  := false
+    lo_swept  := false
+    both_swpt := false
+    hi_pen    := 0.0
+    lo_pen    := 0.0
+
+hi_sweep_new := false
+lo_sweep_new := false
+
+if in_us and not na(lon_h_lk) and not na(lon_l_lk)
+    if high > lon_h_lk and not hi_swept
+        hi_swept     := true
+        hi_sweep_new := true
+    if high > lon_h_lk
+        hi_pen := math.max(hi_pen, high - lon_h_lk)
+    if low < lon_l_lk and not lo_swept
+        lo_swept     := true
+        lo_sweep_new := true
+    if low < lon_l_lk
+        lo_pen := math.max(lo_pen, lon_l_lk - low)
+    if hi_swept and lo_swept
+        both_swpt := true
+
+// ─────────────────────────────────────────────────────────────
+// ROLLING ACCURACY — true N-session ring buffer
+// Fixed-size ring of 100; only first rolling_lb slots used.
+// -1 = slot not yet populated
+// ─────────────────────────────────────────────────────────────
+var array<int> acc_ring   = array.new<int>(100, -1)
+var int        acc_ring_i = 0
+var int        streak     = 0
+var bool       last_win   = false
+var int        acc_wins   = 0   // kept for all-time display
+var int        acc_total  = 0
+
+// Compute rolling stats from ring buffer
+f_rolling_rate() =>
+    int wins  = 0
+    int total = 0
+    int slots = math.min(rolling_lb, 100)
+    for i = 0 to slots - 1
+        int v = array.get(acc_ring, i)
+        if v >= 0
+            total := total + 1
+            wins  := wins + v
+    total > 0 ? math.round(wins * 100.0 / total) : 0
+
+if us_close_bar and not na(s_hi)
+    bool pred_hi  = s_hi > s_lo
+    bool correct  = not both_swpt and
+         (pred_hi ?
+              (hi_swept and not lo_swept) or (hi_swept and lo_swept and hi_pen > lo_pen) :
+              (lo_swept and not hi_swept) or (lo_swept and hi_swept and lo_pen > hi_pen))
+    int outcome   = correct ? 1 : 0
+    array.set(acc_ring, acc_ring_i % math.min(rolling_lb, 100), outcome)
+    acc_ring_i := acc_ring_i + 1
+    if correct
+        acc_wins := acc_wins + 1
+        streak   := last_win ? streak + 1 : 1
+        last_win := true
+    else
+        streak   := last_win ? -1 : streak - 1
+        last_win := false
+    acc_total := acc_total + 1
+
+hit_rate = f_rolling_rate()
+
+// ─────────────────────────────────────────────────────────────
+// NQ STATS — 9AM HOUR CONTINUATION
+// 9am hour green → NY session stays green 70%
+// 9am hour red   → NY session stays red   70%
+// Source: nqstats.com 1H Continuation, 10yr data
+// ─────────────────────────────────────────────────────────────
+var float nine_open  = na
+var bool  nine_bull  = false
+var bool  nine_ready = false
+var bool  prev_nine_bull  = false
+var bool  prev_nine_ready = false
+var bool  prev_ib_upper   = false
+var bool  prev_ib_locked  = false
+
+if nine_am_bar
+    nine_open  := open
+    nine_ready := false
+if ten_am_bar and not na(nine_open)
+    nine_bull  := close > nine_open
+    nine_ready := true
+
+// ─────────────────────────────────────────────────────────────
+// NQ STATS — DAILY SDEV LEVELS
+// 20yr NQ data: 1 SDEV = 1.376% of RTH open
+// 68.27% of sessions close within ±1 SDEV
+// ±1.5 SDEV = trend day territory (rubber band theory)
+// ─────────────────────────────────────────────────────────────
+var float day_open = na
+if rth_open_bar
+    day_open := open
+
+f_sdev(mult) => not na(day_open) ? day_open * (1.0 + mult * sdev_pct / 100.0) : na
+
+sdev_p05 = f_sdev( 0.5)
+sdev_p10 = f_sdev( 1.0)
+sdev_p15 = f_sdev( 1.5)
+sdev_m05 = f_sdev(-0.5)
+sdev_m10 = f_sdev(-1.0)
+sdev_m15 = f_sdev(-1.5)
+
+// ─────────────────────────────────────────────────────────────
+// NQ STATS — IB ANALYSIS
+// IB close in upper half → High breaks 81% before EOD
+// IB close in lower half → Low breaks  74% before EOD
+// IB breaks before 4pm: 96% | before 12pm: 83%
+// ─────────────────────────────────────────────────────────────
+var float ib_h_lk   = na
+var float ib_l_lk   = na
+var float ib_mid_lk = na
+var bool  ib_upper  = false
+var bool  ib_locked = false
+
+if ib_close_bar and not na(ib_h) and not na(ib_l)
+    ib_h_lk   := ib_h
+    ib_l_lk   := ib_l
+    ib_mid_lk := (ib_h + ib_l) / 2.0
+    ib_upper  := close > ib_mid_lk
+    ib_locked := true
+
+if us_close_bar
+    prev_nine_bull  := nine_bull
+    prev_nine_ready := nine_ready
+    prev_ib_upper   := ib_upper
+    prev_ib_locked  := ib_locked
+
+// ─────────────────────────────────────────────────────────────
+// NQ STATS — RTH vs pRTH (83.29% edge)
+// RTH opens outside pRTH → 83.29% chance it won't break other side
+// RTH opens inside pRTH  → 72.66% chance at least one side breaks
+// ─────────────────────────────────────────────────────────────
+var bool rth_out_prth   = false
+var bool rth_above_prth = false
+
+if rth_open_bar and not na(prth_h) and not na(prth_l)
+    rth_out_prth   := open > prth_h or open < prth_l
+    rth_above_prth := open > prth_h
+
+
+// ─────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────
+pat_short(p) =>
+    switch p
+        1 => "P1: Partial Dominance"
+        2 => "P2: Asia Dominance"
+        3 => "P3: Partial Up"
+        4 => "P4: Partial Down"
+        => "—"
+
+pat_long(p) =>
+    switch p
+        1 => "P1: London Engulfs Asia"
+        2 => "P2: Asia Engulfs London"
+        3 => "P3: Partial Up (Bull)"
+        4 => "P4: Partial Down (Bear)"
+        => "—"
+
+tier_str(t) =>
+    switch t
+        1 => "Tier 1 (Strong)"
+        2 => "Tier 2 (Moderate)"
+        3 => "Tier 3 (Risky)"
+        => "—"
+
+tier_col(t) =>
+    switch t
+        1 => color.lime
+        2 => color.yellow
+        3 => color.orange
+        => color.gray
+
+// ─────────────────────────────────────────────────────────────
+// WILLINGNESS SCORE  (Live Price Confirmation)
+// Concept: Matt Giannino — historical stats give EXPECTANCY,
+// live price must show WILLINGNESS to replicate the move.
+//
+// Score 0-4 per session:
+//   W1  Position:   NY opens above (bull) or below (bear) London Mid
+//   W2  Momentum:   majority of first N bars close in bias direction
+//   W3  Structure:  NY open price holding as support/resistance
+//   W4  Bounce:     Price touched London Mid and bounced in bias direction
+//
+// GO     = score >= threshold AND tier 1/2
+// WAIT   = score = threshold - 1
+// NO-GO  = score < threshold - 1 OR bias conflict
+// ─────────────────────────────────────────────────────────────
+
+grp_will = "═══ Willingness Score ═══"
+show_will      = input.bool(true,  "Show Willingness Score",             group=grp_will)
+will_show_lbl  = input.bool(true,  "Show GO/WAIT/NO-GO label @ NY Open", group=grp_will)
+will_min_bars  = input.int(6,      "Bars to evaluate (after NY Open)",   minval=3, maxval=20, group=grp_will)
+col_will_go    = input.color(color.new(color.lime,   0), "GO color",    group=grp_will)
+col_will_wait  = input.color(color.new(color.yellow, 0), "WAIT color",  group=grp_will)
+col_will_nogo  = input.color(color.new(color.red,    0), "NO-GO color", group=grp_will)
+
+var int   will_score_bull    = 0
+var int   will_score_bear    = 0
+var int   will_bars_seen     = 0
+var float will_ny_price      = na
+var bool  will_w3_fail       = false
+var bool  will_w4_done       = false
+var int   will_momentum_bull = 0
+var int   will_momentum_bear = 0
+var bool  will_bounce_bull   = false
+var bool  will_bounce_bear   = false
+var int   will_status        = 0   // 0=pre, 1=GO, 2=WAIT, 3=NO-GO
+
+// Optimal thresholds per pattern/mid (from Python training, 586 hourly sessions)
+will_thresh(p, abv) =>
+    int result = 2
+    if p == 1 and abv
+        result := 3
+    else if p == 1 and not abv
+        result := 2
+    else if p == 2 and abv
+        result := 2
+    else if p == 2 and not abv
+        result := 1
+    else if p == 3 and abv
+        result := 2
+    else if p == 3 and not abv
+        result := 3
+    else if p == 4 and abv
+        result := 3
+    else
+        result := 3
+    result
+
+if ny_open_bar
+    will_score_bull    := 0
+    will_score_bear    := 0
+    will_bars_seen     := 0
+    will_ny_price      := close
+    will_w3_fail       := false
+    will_w4_done       := false
+    will_momentum_bull := 0
+    will_momentum_bear := 0
+    will_bounce_bull   := false
+    will_bounce_bear   := false
+    will_status        := 0
+
+    if not na(lon_mid_lk)
+        if close > lon_mid_lk
+            will_score_bull := will_score_bull + 1
+        else
+            will_score_bear := will_score_bear + 1
+
+if in_us and not ny_open_bar and not na(will_ny_price) and will_bars_seen < will_min_bars
+    will_bars_seen := will_bars_seen + 1
+
+    if close > open
+        will_momentum_bull := will_momentum_bull + 1
+    else if close < open
+        will_momentum_bear := will_momentum_bear + 1
+
+    if not na(will_ny_price)
+        if bias_bull and close < will_ny_price * 0.9998
+            will_w3_fail := true
+        if not bias_bull and close > will_ny_price * 1.0002
+            will_w3_fail := true
+
+    if not will_w4_done and not na(lon_mid_lk)
+        bool touched = low <= lon_mid_lk * 1.0003 and high >= lon_mid_lk * 0.9997
+        if touched
+            if close > open
+                will_bounce_bull := true
+                will_w4_done     := true
+            else if close < open
+                will_bounce_bear := true
+                will_w4_done     := true
+
+    // Recompute scores each bar
+    will_score_bull := 0
+    will_score_bear := 0
+
+    if not na(lon_mid_lk)
+        if will_ny_price > lon_mid_lk
+            will_score_bull := will_score_bull + 1
+        else
+            will_score_bear := will_score_bear + 1
+
+    if will_bars_seen >= 3
+        int req_momentum = math.ceil(will_bars_seen * 0.5)
+        if will_momentum_bull >= req_momentum
+            will_score_bull := will_score_bull + 1
+        if will_momentum_bear >= req_momentum
+            will_score_bear := will_score_bear + 1
+
+    if not will_w3_fail
+        if bias_bull
+            will_score_bull := will_score_bull + 1
+        else
+            will_score_bear := will_score_bear + 1
+
+    if will_bounce_bull
+        will_score_bull := will_score_bull + 1
+    if will_bounce_bear
+        will_score_bear := will_score_bear + 1
+
+if in_us and will_bars_seen == will_min_bars and show_will and pat > 0
+    int thresh    = will_thresh(pat, above_mid)
+    int act_score = bias_bull ? will_score_bull : will_score_bear
+    if act_score >= thresh
+        will_status := 1
+    else if act_score == thresh - 1
+        will_status := 2
+    else
+        will_status := 3
+
+var label will_lbl = na
+if in_us and will_bars_seen == will_min_bars and show_will and will_show_lbl and pat > 0
+    label.delete(will_lbl)
+    int thresh     = will_thresh(pat, above_mid)
+    int act_score  = bias_bull ? will_score_bull : will_score_bear
+    string status_str = will_status == 1 ? "GO" : will_status == 2 ? "WAIT" : "NO-GO"
+    color lbl_col = will_status == 1 ? col_will_go : will_status == 2 ? col_will_wait : col_will_nogo
+    color lbl_col_t = color.new(lbl_col, 25)
+    will_lbl := label.new(
+         bar_index, close,
+         text      = status_str + "\nW: " + str.tostring(act_score) + "/" + str.tostring(thresh) + "\n" +
+                     (bias_bull ? "BULL" : "BEAR") + " " + str.tostring(act_score) + "pts",
+         color     = lbl_col_t,
+         textcolor = color.white,
+         style     = bias_bull ? label.style_label_up : label.style_label_down,
+         size      = size.normal,
+         yloc      = bias_bull ? yloc.belowbar : yloc.abovebar)
+
+will_status_str() =>
+    will_status == 1 ? "GO" : will_status == 2 ? "WAIT" : will_status == 3 ? "NO-GO" : will_bars_seen > 0 ? "Evaluating..." : "Pre-NY"
+
+will_status_col() =>
+    will_status == 1 ? col_will_go : will_status == 2 ? col_will_wait : will_status == 3 ? col_will_nogo : color.gray
+
+will_score_str() =>
+    string result = "—"
+    if pat > 0 and not na(lon_mid_lk)
+        int thresh = will_thresh(pat, above_mid)
+        int sc     = bias_bull ? will_score_bull : will_score_bear
+        bool w2_ok = bias_bull ? will_momentum_bull >= math.ceil(will_bars_seen * 0.5) : will_momentum_bear >= math.ceil(will_bars_seen * 0.5)
+        bool w4_ok = bias_bull ? will_bounce_bull : will_bounce_bear
+        result := str.tostring(sc) + "/" + str.tostring(thresh) +
+             " W1:" + (above_mid == bias_bull ? "Y" : "N") +
+             " W2:" + (w2_ok ? "Y" : "N") +
+             " W3:" + (not will_w3_fail ? "Y" : "N") +
+             " W4:" + (w4_ok ? "Y" : "-")
+    result
+
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING — SESSION BOXES
+// ─────────────────────────────────────────────────────────────
+
+// ── Asia ──
+var box box_asia = na
+if asia_open_bar and show_asia
+    box.delete(box_asia)
+    box_asia := box.new(bar_index, high, bar_index, low,
+         border_color=col_asia_c, bgcolor=col_asia_c, border_width=1, extend=extend.right)
+if show_asia and not na(box_asia)
+    if in_asia and not asia_open_bar
+        box.set_right(box_asia, bar_index)
+        box.set_top(box_asia,    math.max(box.get_top(box_asia),    high))
+        box.set_bottom(box_asia, math.min(box.get_bottom(box_asia), low))
+    if london_open_bar
+        box.set_extend(box_asia, extend.none)
+
+// ── London ──
+var box box_lon = na
+if london_open_bar and show_london
+    box.delete(box_lon)
+    box_lon := box.new(bar_index, high, bar_index, low,
+         border_color=col_london_c, bgcolor=col_london_c, border_width=1, extend=extend.right)
+if show_london and not na(box_lon)
+    if in_london and not london_open_bar
+        box.set_right(box_lon, bar_index)
+        box.set_top(box_lon,    math.max(box.get_top(box_lon),    high))
+        box.set_bottom(box_lon, math.min(box.get_bottom(box_lon), low))
+    if ny_open_bar
+        box.set_extend(box_lon, extend.none)
+
+// ── US (border turns green=correct, orange=failure, red=wrong at close) ──
+var box box_us = na
+if ny_open_bar and show_us
+    box.delete(box_us)
+    box_us := box.new(bar_index, high, bar_index, low,
+         border_color=color.new(color.gray, 60), bgcolor=col_us_c, border_width=1, extend=extend.right)
+if show_us and not na(box_us)
+    if in_us and not ny_open_bar
+        box.set_right(box_us, bar_index)
+        box.set_top(box_us,    math.max(box.get_top(box_us),    high))
+        box.set_bottom(box_us, math.min(box.get_bottom(box_us), low))
+    if us_close_bar
+        box.set_extend(box_us, extend.none)
+        bool correct_outcome = not both_swpt and
+             ((bias_bull and hi_swept and not lo_swept) or
+              (not bias_bull and lo_swept and not hi_swept) or
+              (hi_swept and lo_swept and bias_bull and hi_pen > lo_pen) or
+              (hi_swept and lo_swept and not bias_bull and lo_pen > hi_pen))
+        box.set_border_color(box_us, both_swpt ? color.new(color.orange, 20) : correct_outcome ? color.new(color.lime, 20) : color.new(color.red, 20))
+        box.set_border_width(box_us, 2)
+
+// ── IB ──
+var box box_ib = na
+if rth_open_bar and show_ib
+    box.delete(box_ib)
+    box_ib := box.new(bar_index, high, bar_index, low,
+         border_color=col_ib_c, bgcolor=col_ib_c, border_width=1, extend=extend.right)
+if show_ib and not na(box_ib)
+    if in_ib and not rth_open_bar
+        box.set_right(box_ib, bar_index)
+        box.set_top(box_ib,    math.max(box.get_top(box_ib),    high))
+        box.set_bottom(box_ib, math.min(box.get_bottom(box_ib), low))
+    if ib_close_bar
+        box.set_extend(box_ib, extend.none)
+
+// ── Noon Curve Zone ──
+var box box_noon = na
+noon_start_bar = et_h == 11 and et_m == 30
+noon_end_bar   = et_h == 12 and et_m == 30
+if noon_start_bar and show_noon
+    box.delete(box_noon)
+    box_noon := box.new(bar_index, high * 1.005, bar_index, low * 0.995,
+         border_color=col_noon_c, bgcolor=col_noon_c, border_width=1, extend=extend.right)
+if show_noon and not na(box_noon)
+    if in_noon and not noon_start_bar
+        box.set_right(box_noon, bar_index)
+    if noon_end_bar
+        box.set_extend(box_noon, extend.none)
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING — MIDLINES
+// ─────────────────────────────────────────────────────────────
+var line line_asia_mid   = na
+var line line_lon_mid    = na
+var line line_lon_mid_us = na
+
+if london_open_bar and show_midlines and not na(asia_h_lk)
+    line.delete(line_asia_mid)
+    line_asia_mid := line.new(asia_bi, (asia_h_lk + asia_l_lk) / 2.0,
+         bar_index, (asia_h_lk + asia_l_lk) / 2.0,
+         color=color.new(col_asia_c, 20), style=line.style_dotted, width=1)
+
+if ny_open_bar and show_midlines and not na(lon_h_lk)
+    line.delete(line_lon_mid)
+    line_lon_mid := line.new(lon_bi, lon_mid_lk, bar_index, lon_mid_lk,
+         color=color.new(col_london_c, 20), style=line.style_dotted, width=1)
+
+if ny_open_bar and show_lon_mid_ext and not na(lon_mid_lk)
+    line.delete(line_lon_mid_us)
+    line_lon_mid_us := line.new(bar_index, lon_mid_lk, bar_index + 1, lon_mid_lk,
+         color=color.new(color.orange, 50), style=line.style_dotted, width=1, extend=extend.right)
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING — LONDON H/L BIAS EXTENSIONS
+// Dashed until swept, then solid + thicker
+// ─────────────────────────────────────────────────────────────
+var line line_lon_h = na
+var line line_lon_l = na
+
+if ny_open_bar and show_lon_ext and not na(lon_h_lk)
+    line.delete(line_lon_h)
+    line.delete(line_lon_l)
+    line_lon_h := line.new(bar_index, lon_h_lk, bar_index + 1, lon_h_lk,
+         color=color.new(col_bull_c, 40), style=line.style_dashed, width=1, extend=extend.right)
+    line_lon_l := line.new(bar_index, lon_l_lk, bar_index + 1, lon_l_lk,
+         color=color.new(col_bear_c, 40), style=line.style_dashed, width=1, extend=extend.right)
+
+if show_lon_ext and not na(line_lon_h)
+    if hi_sweep_new
+        line.set_style(line_lon_h, line.style_solid)
+        line.set_width(line_lon_h, 2)
+        line.set_color(line_lon_h, col_bull_c)
+    if lo_sweep_new
+        line.set_style(line_lon_l, line.style_solid)
+        line.set_width(line_lon_l, 2)
+        line.set_color(line_lon_l, col_bear_c)
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING — BIAS ARROW @ NY OPEN
+// ─────────────────────────────────────────────────────────────
+var label lbl_arrow = na
+if ny_open_bar and show_arrow and not na(s_hi)
+    label.delete(lbl_arrow)
+    lbl_arrow := label.new(bar_index, close,
+         text      = bias_bull ? "▲ " + str.tostring(s_hi, "#.#") + "%" : "▼ " + str.tostring(s_lo, "#.#") + "%",
+         color     = color.new(bias_bull ? col_bull_c : col_bear_c, 30),
+         textcolor = color.white,
+         style     = bias_bull ? label.style_label_up : label.style_label_down,
+         size      = size.normal,
+         yloc      = bias_bull ? yloc.belowbar : yloc.abovebar)
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING — MEDIAN PENETRATION TARGET ZONE
+// ─────────────────────────────────────────────────────────────
+var box box_target = na
+if ny_open_bar and show_target and not na(lon_h_lk) and not na(s_pen)
+    box.delete(box_target)
+    box_target := bias_bull ?
+         box.new(bar_index, lon_h_lk + s_pen, bar_index + 1, lon_h_lk,
+              border_color=col_target_c, bgcolor=col_target_c, border_width=1, extend=extend.right) :
+         box.new(bar_index, lon_l_lk, bar_index + 1, lon_l_lk - s_pen,
+              border_color=col_target_c, bgcolor=col_target_c, border_width=1, extend=extend.right)
+if show_target and not na(box_target) and us_close_bar
+    box.set_extend(box_target, extend.none)
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING — SWEEP MARKERS
+// ─────────────────────────────────────────────────────────────
+if show_sweepmark and hi_sweep_new
+    label.new(bar_index, lon_h_lk, text="H",
+         color=color.new(col_bull_c, 20), textcolor=color.white,
+         style=label.style_label_down, size=size.small)
+if show_sweepmark and lo_sweep_new
+    label.new(bar_index, lon_l_lk, text="L",
+         color=color.new(col_bear_c, 20), textcolor=color.white,
+         style=label.style_label_up, size=size.small)
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING — IB EXTENSION LEVELS
+// ─────────────────────────────────────────────────────────────
+var line ib_h1  = na, var line ib_h05 = na, var line ib_h15 = na
+var line ib_l1  = na, var line ib_l05 = na, var line ib_l15 = na
+
+if ib_close_bar and show_ib_ext and not na(ib_h_lk)
+    float rng = ib_h_lk - ib_l_lk
+    line.delete(ib_h1),  line.delete(ib_h05), line.delete(ib_h15)
+    line.delete(ib_l1),  line.delete(ib_l05), line.delete(ib_l15)
+    ib_h05 := line.new(bar_index, ib_h_lk + rng*0.5, bar_index+1, ib_h_lk + rng*0.5, color=col_ib_c, style=line.style_dotted, width=1, extend=extend.right)
+    ib_h1  := line.new(bar_index, ib_h_lk + rng*1.0, bar_index+1, ib_h_lk + rng*1.0, color=col_ib_c, style=line.style_dashed, width=1, extend=extend.right)
+    ib_h15 := line.new(bar_index, ib_h_lk + rng*1.5, bar_index+1, ib_h_lk + rng*1.5, color=col_ib_c, style=line.style_solid,  width=1, extend=extend.right)
+    ib_l05 := line.new(bar_index, ib_l_lk - rng*0.5, bar_index+1, ib_l_lk - rng*0.5, color=col_ib_c, style=line.style_dotted, width=1, extend=extend.right)
+    ib_l1  := line.new(bar_index, ib_l_lk - rng*1.0, bar_index+1, ib_l_lk - rng*1.0, color=col_ib_c, style=line.style_dashed, width=1, extend=extend.right)
+    ib_l15 := line.new(bar_index, ib_l_lk - rng*1.5, bar_index+1, ib_l_lk - rng*1.5, color=col_ib_c, style=line.style_solid,  width=1, extend=extend.right)
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING — DAILY SDEV LEVELS
+// ─────────────────────────────────────────────────────────────
+var line sd_p05 = na, var line sd_p10 = na, var line sd_p15 = na
+var line sd_m05 = na, var line sd_m10 = na, var line sd_m15 = na
+
+if rth_open_bar and show_sdev
+    line.delete(sd_p05), line.delete(sd_p10), line.delete(sd_p15)
+    line.delete(sd_m05), line.delete(sd_m10), line.delete(sd_m15)
+    sd_p05 := line.new(bar_index, sdev_p05, bar_index+1, sdev_p05, color=color.new(col_sdev_c,70), style=line.style_dotted, width=1, extend=extend.right)
+    sd_p10 := line.new(bar_index, sdev_p10, bar_index+1, sdev_p10, color=color.new(col_sdev_c,40), style=line.style_dashed, width=1, extend=extend.right)
+    sd_p15 := line.new(bar_index, sdev_p15, bar_index+1, sdev_p15, color=color.new(col_sdev_c,15), style=line.style_solid,  width=2, extend=extend.right)
+    sd_m05 := line.new(bar_index, sdev_m05, bar_index+1, sdev_m05, color=color.new(col_sdev_c,70), style=line.style_dotted, width=1, extend=extend.right)
+    sd_m10 := line.new(bar_index, sdev_m10, bar_index+1, sdev_m10, color=color.new(col_sdev_c,40), style=line.style_dashed, width=1, extend=extend.right)
+    sd_m15 := line.new(bar_index, sdev_m15, bar_index+1, sdev_m15, color=color.new(col_sdev_c,15), style=line.style_solid,  width=2, extend=extend.right)
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING — pRTH LEVELS
+// ─────────────────────────────────────────────────────────────
+var line prth_h_ln = na, var line prth_l_ln = na
+
+if rth_open_bar and show_rth_break and not na(prth_h)
+    line.delete(prth_h_ln), line.delete(prth_l_ln)
+    prth_col = rth_out_prth ? color.new(color.fuchsia, 25) : color.new(color.gray, 55)
+    prth_h_ln := line.new(bar_index, prth_h, bar_index+1, prth_h, color=prth_col, style=line.style_dashed, width=1, extend=extend.right)
+    prth_l_ln := line.new(bar_index, prth_l, bar_index+1, prth_l, color=prth_col, style=line.style_dashed, width=1, extend=extend.right)
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING — 9AM CONTINUATION LABEL
+// ─────────────────────────────────────────────────────────────
+var label lbl_9am = na
+if ten_am_bar and show_9am and nine_ready
+    label.delete(lbl_9am)
+    lbl_9am := label.new(bar_index,
+         nine_bull ? low * 0.9993 : high * 1.0007,
+         text      = nine_bull ? "9AM Bull 70%" : "9AM Bear 70%",
+         color     = color.new(nine_bull ? col_bull_c : col_bear_c, 45),
+         textcolor = color.white,
+         style     = nine_bull ? label.style_label_up : label.style_label_down,
+         size      = size.small)
+
+// ─────────────────────────────────────────────────────────────
+// DRAWING — IB DIRECTION LABEL
+// ─────────────────────────────────────────────────────────────
+var label lbl_ib = na
+if ib_close_bar and show_ib and ib_locked
+    label.delete(lbl_ib)
+    lbl_ib := label.new(bar_index,
+         ib_upper ? ib_h_lk : ib_l_lk,
+         text      = ib_upper ? "IB 81%" : "IB 74%",
+         color     = color.new(ib_upper ? col_bull_c : col_bear_c, 45),
+         textcolor = color.white,
+         style     = ib_upper ? label.style_label_down : label.style_label_up,
+         size      = size.small)
+
+
+// ─────────────────────────────────────────────────────────────
+// RTH CONTINUATION BIAS
+// Source: nqstats.com "Morning Judas" — 10yr data (2014-2024)
+// NOTE: This is NOT the ICT Judas Swing — see block below.
+// This is a pure statistical continuation concept around the 9:30 RTH open.
+//
+// Statistics (10yr NQ, 2014-2024):
+//   Up @ 9:40   → Continuation 10am: 64% | False: 36%
+//   Down @ 9:40 → Continuation 10am: 70% | False: 30%
+//   Up @ 10:00  → Continuation 12pm: 68% | False: 32%
+//   Down @ 10:00→ Continuation 12pm: 59% | False: 41%
+// ─────────────────────────────────────────────────────────────
+
+grp_rthcont = "═══ RTH Continuation (nqstats) ═══"
+show_rthcont     = input.bool(true,  "RTH Continuation Bias",             group=grp_rthcont)
+show_rthcont_ref = input.bool(true,  "RTH Open Reference Line",           group=grp_rthcont)
+show_rthcont_ext = input.bool(true,  "Extended (10am→12pm)",              group=grp_rthcont)
+col_rthcont_c    = input.color(color.new(color.lime, 0), "Continuation color", group=grp_rthcont)
+col_rthcont_f    = input.color(color.new(color.red,  0), "False Swing color",  group=grp_rthcont)
+
+bar_940  = et_h == 9  and et_m == 40
+bar_1000 = et_h == 10 and et_m == 0
+bar_1200 = et_h == 12 and et_m == 0
+
+var float jd_rth_open   = na
+var float jd_price_940  = na
+var float jd_price_1000 = na
+var float jd_price_1200 = na
+var bool  jd_up_at_940  = false
+var bool  jd_dn_at_940  = false
+var bool  jd_phase1_set = false
+var bool  jd_phase2_set = false
+var int   jd_result     = 0  // 0=unknown, 1=cont, 2=false, 3=cont_ext, 4=false_ext
+
+if rth_open_bar
+    jd_rth_open   := open
+    jd_price_940  := na
+    jd_price_1000 := na
+    jd_price_1200 := na
+    jd_up_at_940  := false
+    jd_dn_at_940  := false
+    jd_phase1_set := false
+    jd_phase2_set := false
+    jd_result     := 0
+
+// Phase 1 @ 9:40 — determine swing direction
+if bar_940 and not na(jd_rth_open)
+    jd_price_940  := close
+    jd_up_at_940  := close > jd_rth_open
+    jd_dn_at_940  := close < jd_rth_open
+    jd_phase1_set := true
+
+// Phase 2 @ 10:00 — continuation or false swing
+if bar_1000 and jd_phase1_set and not na(jd_price_940)
+    jd_price_1000 := close
+    jd_phase2_set := true
+    if jd_up_at_940
+        if close > jd_price_940
+            jd_result := 1  // Continuation (64%)
+        else if close < jd_rth_open
+            jd_result := 2  // False Swing (36%)
+        else
+            jd_result := 0  // Momentum loss — neutral
+    else if jd_dn_at_940
+        if close < jd_price_940
+            jd_result := 1  // Continuation (70%)
+        else if close > jd_rth_open
+            jd_result := 2  // False Swing (30%)
+        else
+            jd_result := 0  // Momentum loss — neutral
+
+// Phase 3 @ 12:00 — extended confirmation
+if bar_1200 and jd_phase2_set and show_rthcont_ext and not na(jd_price_1000)
+    jd_price_1200 := close
+    if jd_up_at_940
+        if close > jd_price_1000
+            jd_result := 3  // Extended Continuation (68%)
+        else if close < jd_rth_open
+            jd_result := 4  // Extended False Swing (32%)
+    else if jd_dn_at_940
+        if close < jd_price_1000
+            jd_result := 3  // Extended Continuation (59%)
+        else if close > jd_rth_open
+            jd_result := 4  // Extended False Swing (41%)
+
+// ── RTH Open reference line ──
+var line jd_ref_line = na
+if rth_open_bar and show_rthcont and show_rthcont_ref
+    line.delete(jd_ref_line)
+    jd_ref_line := line.new(bar_index, open, bar_index+1, open,
+         color=color.new(color.white, 55), style=line.style_dotted, width=1, extend=extend.right)
+if us_close_bar and not na(jd_ref_line)
+    line.set_extend(jd_ref_line, extend.none)
+
+// ── Phase 1 label @ 9:40 ──
+var label jd_lbl_940 = na
+if bar_940 and show_rthcont and jd_phase1_set
+    label.delete(jd_lbl_940)
+    bool is_up = jd_up_at_940
+    float cont_pct = is_up ? 64.0 : 70.0
+    float rev_pct  = is_up ? 36.0 : 30.0
+    jd_lbl_940 := label.new(bar_index, close,
+         text      = "RTH " + (is_up ? "▲" : "▼") + "\nCont: " + str.tostring(cont_pct,"#") + "%\nFalse: " + str.tostring(rev_pct,"#") + "%",
+         color     = color.new(col_rthcont_c, 35), textcolor=color.white,
+         style     = is_up ? label.style_label_up : label.style_label_down,
+         size      = size.small,
+         yloc      = is_up ? yloc.belowbar : yloc.abovebar)
+
+// ── Phase 2 label @ 10:00 ──
+var label jd_lbl_1000 = na
+if bar_1000 and show_rthcont and jd_phase2_set
+    label.delete(jd_lbl_1000)
+    bool is_cont  = jd_result == 1
+    bool is_false = jd_result == 2
+    float ext_c = jd_up_at_940 ? 68.0 : 59.0
+    float ext_f = jd_up_at_940 ? 32.0 : 41.0
+    string result_text = (is_cont ? "CONT" : is_false ? "FALSE" : "NEUTRAL") +
+         "\n12pm C:" + str.tostring(ext_c,"#") + "% F:" + str.tostring(ext_f,"#") + "%"
+    color lbl_col = is_false ? col_rthcont_f : col_rthcont_c
+    jd_lbl_1000 := label.new(bar_index, close,
+         text      = result_text,
+         color     = color.new(lbl_col, 30), textcolor=color.white,
+         style     = jd_up_at_940 ? label.style_label_up : label.style_label_down,
+         size      = size.small,
+         yloc      = jd_up_at_940 ? yloc.belowbar : yloc.abovebar)
+
+// ── Phase 3 label @ 12:00 ──
+var label jd_lbl_1200 = na
+if bar_1200 and show_rthcont and show_rthcont_ext and (jd_result == 3 or jd_result == 4)
+    label.delete(jd_lbl_1200)
+    bool ext_cont  = jd_result == 3
+    color ext_col  = ext_cont ? col_rthcont_c : col_rthcont_f
+    jd_lbl_1200 := label.new(bar_index, close,
+         text      = ext_cont ? "EXT CONT" : "EXT FALSE",
+         color     = color.new(ext_col, 30), textcolor=color.white,
+         style     = jd_up_at_940 ? label.style_label_up : label.style_label_down,
+         size      = size.small,
+         yloc      = jd_up_at_940 ? yloc.belowbar : yloc.abovebar)
+
+jd_result_str() =>
+    switch jd_result
+        1 => "Continuation"
+        2 => "False Swing"
+        3 => "Ext. Cont."
+        4 => "Ext. False"
+        => jd_phase1_set ? (jd_up_at_940 ? "Watching..." : "Watching...") : "Pre-9:40"
+
+jd_result_col() =>
+    switch jd_result
+        1 => col_rthcont_c
+        2 => col_rthcont_f
+        3 => col_rthcont_c
+        4 => col_rthcont_f
+        => color.gray
+
+jd_prob_str() =>
+    if jd_result == 1 or jd_result == 2
+        float ext_c = jd_up_at_940 ? 68.0 : 59.0
+        "12pm Cont " + str.tostring(ext_c,"#") + "%"
+    else if jd_result == 3 or jd_result == 4
+        "Confirmed"
+    else if jd_phase1_set
+        float cont_p = jd_up_at_940 ? 64.0 : 70.0
+        "10am Cont " + str.tostring(cont_p,"#") + "%"
+    else
+        "—"
+
+
+// ─────────────────────────────────────────────────────────────
+// ICT JUDAS SWING DETECTION
+// Concept: ICT / Smart Money Concepts (Inner Circle Trader)
+//
+// Definition: False price move (liquidity grab) that misleads retail
+// traders, followed by sharp reversal in the true daily direction —
+// confirmed by CHoCH (Change of Character / Market Structure Shift).
+//
+// Timeline (ET):
+//   00:00 = NY Midnight Open (NYMOC) — reference price
+//   00:00-02:00 = Asian killzone — range forms
+//   02:00-05:00 = London killzone — Judas plays out
+//   03:00 = London open — highest probability
+//
+// Logic:
+//   Bullish: price drops BELOW Asian Low (liquidity sweep)
+//            then strong bullish CHoCH = confirmed Judas Bull
+//   Bearish: price rises ABOVE Asian High (liquidity sweep)
+//            then strong bearish CHoCH = confirmed Judas Bear
+//
+// Requirements: Daily bias + sweep + CHoCH = CONFIRMED
+//               Sweep only = POTENTIAL (wait for CHoCH)
+// ─────────────────────────────────────────────────────────────
+
+grp_ict = "═══ ICT Judas Swing ═══"
+show_ict_judas   = input.bool(true,  "ICT Judas Swing Detection",          group=grp_ict)
+show_nymoc       = input.bool(true,  "NY Midnight Open line (NYMOC)",      group=grp_ict)
+show_fvg         = input.bool(true,  "FVG Entry Zone (after CHoCH)",       group=grp_ict)
+show_sl_level    = input.bool(true,  "SL Level (Judas High/Low)",          group=grp_ict)
+ict_bias_input   = input.string("AUTO","Daily Bias",                       group=grp_ict,
+                   options=["AUTO","BULLISH","BEARISH","NONE"])
+ict_atr_mult     = input.float(0.8,  "Min CHoCH candle size (x ATR14)",    group=grp_ict,
+                   minval=0.3, maxval=3.0, step=0.1)
+col_ict_bull     = input.color(color.new(color.lime, 0),  "Judas Bull color",  group=grp_ict)
+col_ict_bear     = input.color(color.new(color.red,  0),  "Judas Bear color",  group=grp_ict)
+col_ict_fvg_bull = input.color(color.new(color.lime, 80), "FVG Bull zone",     group=grp_ict)
+col_ict_fvg_bear = input.color(color.new(color.red,  80), "FVG Bear zone",     group=grp_ict)
+col_nymoc        = input.color(color.new(color.white,55), "NYMOC line color",  group=grp_ict)
+
+nymoc_bar       = et_h == 0  and et_m == 0
+in_london_kz    = et_h >= 2  and et_h < 5
+london_kz_close = et_h == 5  and et_m == 0
+
+[daily_bull_raw] = request.security(syminfo.tickerid, "D",
+     [close > open], lookahead=barmerge.lookahead_off)
+
+ict_daily_bull  = ict_bias_input == "BULLISH" ? true : ict_bias_input == "BEARISH" ? false : ict_bias_input == "NONE" ? true : daily_bull_raw
+ict_bias_active = ict_bias_input != "NONE"
+
+var float nymoc_price     = na
+var float ict_asian_h     = na
+var float ict_asian_l     = na
+var float ict_sweep_low   = na
+var float ict_sweep_high  = na
+var float ict_sweep_c_high = na
+var float ict_sweep_c_low  = na
+var int   ict_sweep_bar   = na
+var bool  ict_bull_sweep  = false
+var bool  ict_bear_sweep  = false
+var bool  ict_bull_choch  = false
+var bool  ict_bear_choch  = false
+var int   ict_choch_bar   = na
+var float ict_choch_price = na
+var bool  ict_confirmed   = false
+var bool  ict_bull_conf   = false
+var bool  ict_bear_conf   = false
+var int   ict_status      = 0  // 0=none, 1=pot.bull, 2=pot.bear, 3=conf.bull, 4=conf.bear
+var bool  ict_fvg_done    = false
+
+if nymoc_bar
+    nymoc_price     := open
+    ict_asian_h     := na
+    ict_asian_l     := na
+    ict_sweep_low   := na
+    ict_sweep_high  := na
+    ict_sweep_bar   := na
+    ict_sweep_c_high := na
+    ict_sweep_c_low  := na
+    ict_bull_sweep  := false
+    ict_bear_sweep  := false
+    ict_bull_choch  := false
+    ict_bear_choch  := false
+    ict_choch_bar   := na
+    ict_choch_price := na
+    ict_confirmed   := false
+    ict_bull_conf   := false
+    ict_bear_conf   := false
+    ict_status      := 0
+    ict_fvg_done    := false
+
+// Lock Asian range at London killzone open (02:00 ET)
+if london_open_bar and not na(asia_h_lk) and not na(asia_l_lk)
+    ict_asian_h := asia_h_lk
+    ict_asian_l := asia_l_lk
+
+// ── Phase 1: Sweep detection (02:00-05:00 ET) ──
+if show_ict_judas and in_london_kz and not na(ict_asian_l) and not na(ict_asian_h)
+    if not ict_bull_sweep and not ict_bear_sweep
+        if low < ict_asian_l and (not ict_bias_active or ict_daily_bull)
+            ict_bull_sweep   := true
+            ict_sweep_low    := low
+            ict_sweep_bar    := bar_index
+            ict_sweep_c_high := high
+            ict_sweep_c_low  := low
+            ict_status       := 1
+
+    if not ict_bull_sweep and not ict_bear_sweep
+        if high > ict_asian_h and (not ict_bias_active or not ict_daily_bull)
+            ict_bear_sweep   := true
+            ict_sweep_high   := high
+            ict_sweep_bar    := bar_index
+            ict_sweep_c_high := high
+            ict_sweep_c_low  := low
+            ict_status       := 2
+
+    if ict_bull_sweep and low < nz(ict_sweep_low, low)
+        ict_sweep_low := low
+    if ict_bear_sweep and high > nz(ict_sweep_high, high)
+        ict_sweep_high := high
+
+// ── Phase 2: CHoCH detection ──
+// Bullish CHoCH: strong bullish displacement candle closing above sweep candle high
+// Bearish CHoCH: strong bearish displacement candle closing below sweep candle low
+atr14       = ta.atr(14)
+candle_size = high - low
+
+if show_ict_judas and not ict_confirmed
+    if ict_bull_sweep and not ict_bull_choch and not na(ict_sweep_bar) and bar_index > ict_sweep_bar
+        if close > nz(ict_sweep_c_high, ict_asian_l) and candle_size > atr14 * ict_atr_mult and close > nz(nymoc_price, close * 0.999)
+            ict_bull_choch  := true
+            ict_choch_bar   := bar_index
+            ict_choch_price := high
+            ict_confirmed   := true
+            ict_bull_conf   := true
+            ict_status      := 3
+
+    if ict_bear_sweep and not ict_bear_choch and not na(ict_sweep_bar) and bar_index > ict_sweep_bar
+        if close < nz(ict_sweep_c_low, ict_asian_h) and candle_size > atr14 * ict_atr_mult and close < nz(nymoc_price, close * 1.001)
+            ict_bear_choch  := true
+            ict_choch_bar   := bar_index
+            ict_choch_price := low
+            ict_confirmed   := true
+            ict_bear_conf   := true
+            ict_status      := 4
+
+// ── NYMOC line ──
+var line nymoc_line = na
+var label nymoc_lbl = na
+if nymoc_bar and show_ict_judas and show_nymoc
+    line.delete(nymoc_line)
+    label.delete(nymoc_lbl)
+    nymoc_line := line.new(bar_index, open, bar_index+1, open,
+         color=col_nymoc, style=line.style_dotted, width=1, extend=extend.right)
+    nymoc_lbl := label.new(bar_index, open, text="NYMOC",
+         color=color.new(color.gray,70), textcolor=color.new(color.white,30),
+         style=label.style_label_right, size=size.tiny)
+if not na(nymoc_line) and us_close_bar
+    line.set_extend(nymoc_line, extend.none)
+
+// ── Sweep label ──
+var label ict_sweep_lbl = na
+if show_ict_judas
+    if ict_bull_sweep and not ict_bull_sweep[1]
+        label.delete(ict_sweep_lbl)
+        ict_sweep_lbl := label.new(bar_index, low,
+             text="JUDAS SWEEP\nWait for CHoCH...",
+             color=color.new(col_ict_bull,40), textcolor=color.white,
+             style=label.style_label_up, size=size.small)
+    if ict_bear_sweep and not ict_bear_sweep[1]
+        label.delete(ict_sweep_lbl)
+        ict_sweep_lbl := label.new(bar_index, high,
+             text="JUDAS SWEEP\nWait for CHoCH...",
+             color=color.new(col_ict_bear,40), textcolor=color.white,
+             style=label.style_label_down, size=size.small)
+
+// ── CHoCH / Confirmed Judas label ──
+var label ict_choch_lbl = na
+if show_ict_judas and ict_confirmed and not ict_confirmed[1]
+    label.delete(ict_choch_lbl)
+    if ict_bull_conf
+        ict_choch_lbl := label.new(bar_index, low,
+             text="JUDAS BULL\nCHoCH confirmed",
+             color=color.new(col_ict_bull,20), textcolor=color.white,
+             style=label.style_label_up, size=size.normal)
+    else
+        ict_choch_lbl := label.new(bar_index, high,
+             text="JUDAS BEAR\nCHoCH confirmed",
+             color=color.new(col_ict_bear,20), textcolor=color.white,
+             style=label.style_label_down, size=size.normal)
+
+// ── SL Level ──
+var line ict_sl_line = na
+var label ict_sl_lbl = na
+if show_ict_judas and show_sl_level and ict_confirmed and not ict_confirmed[1]
+    line.delete(ict_sl_line)
+    label.delete(ict_sl_lbl)
+    float sl_price = ict_bull_conf ? nz(ict_sweep_low, low) - atr14*0.2 : nz(ict_sweep_high, high) + atr14*0.2
+    color sl_col   = ict_bull_conf ? col_ict_bull : col_ict_bear
+    ict_sl_line := line.new(bar_index, sl_price, bar_index+1, sl_price,
+         color=color.new(sl_col,40), style=line.style_dashed, width=1, extend=extend.right)
+    ict_sl_lbl := label.new(bar_index, sl_price, text="SL",
+         color=color.new(sl_col,50), textcolor=color.white,
+         style=ict_bull_conf ? label.style_label_up : label.style_label_down, size=size.tiny)
+if not na(ict_sl_line) and us_close_bar
+    line.set_extend(ict_sl_line, extend.none)
+
+// ── FVG Entry Zone ──
+// Bullish FVG: low[0] > high[2] → imbalance gap
+// Bearish FVG: high[0] < low[2] → imbalance gap
+var box   ict_fvg_box = na
+var label ict_fvg_lbl = na
+
+if show_ict_judas and show_fvg and ict_confirmed and not ict_fvg_done
+    if not na(ict_choch_bar) and bar_index >= ict_choch_bar + 2
+        bool bull_fvg_found = ict_bull_conf and low > high[2]
+        bool bear_fvg_found = ict_bear_conf and high < low[2]
+        if bull_fvg_found
+            box.delete(ict_fvg_box), label.delete(ict_fvg_lbl)
+            ict_fvg_box := box.new(bar_index-2, low, bar_index+1, high[2],
+                 border_color=col_ict_fvg_bull, bgcolor=col_ict_fvg_bull, border_width=1, extend=extend.right)
+            ict_fvg_lbl := label.new(bar_index, (low+high[2])/2,
+                 text="FVG", color=color.new(col_ict_bull,40), textcolor=color.white,
+                 style=label.style_label_right, size=size.tiny)
+            ict_fvg_done := true
+        if bear_fvg_found
+            box.delete(ict_fvg_box), label.delete(ict_fvg_lbl)
+            ict_fvg_box := box.new(bar_index-2, low[2], bar_index+1, high,
+                 border_color=col_ict_fvg_bear, bgcolor=col_ict_fvg_bear, border_width=1, extend=extend.right)
+            ict_fvg_lbl := label.new(bar_index, (low[2]+high)/2,
+                 text="FVG", color=color.new(col_ict_bear,40), textcolor=color.white,
+                 style=label.style_label_right, size=size.tiny)
+            ict_fvg_done := true
+if not na(ict_fvg_box) and us_close_bar
+    box.set_extend(ict_fvg_box, extend.none)
+
+ict_status_str() =>
+    switch ict_status
+        1 => "Pot. Bull"
+        2 => "Pot. Bear"
+        3 => "BULL CONF"
+        4 => "BEAR CONF"
+        => "None"
+
+ict_status_col() =>
+    switch ict_status
+        1 => color.new(col_ict_bull, 30)
+        2 => color.new(col_ict_bear, 30)
+        3 => col_ict_bull
+        4 => col_ict_bear
+        => color.gray
+
+
+// ═════════════════════════════════════════════════════════════
+// Q-LEARNING AGENT
+// Architecture: 72-state tabular Q-learning, ε-greedy, γ=0
+//
+// State space (72 states):
+//   pat(4) × mid(2) × conf(3) × rth(3) = 72
+//
+// Confluence score (0-2):
+//   +1 if 9AM bias agrees with pattern bias
+//   +1 if IB position agrees with pattern bias
+//
+// RTH context (0-2):
+//   0 = RTH inside pRTH (neutral)
+//   1 = RTH outside pRTH, agrees with bias
+//   2 = RTH outside pRTH, disagrees with bias
+//
+// Actions: 0=LONG  1=SHORT  2=SKIP
+// Reward: +1.5 correct+pen | +1.0 correct | -1.0 wrong | -0.5 both | +0.1/-0.2/0 skip
+// ═════════════════════════════════════════════════════════════
+
+grp_rl = "═══ Q-Learning Agent ═══"
+rl_enabled      = input.bool(true,  "Enable Q-Learning Agent",               group=grp_rl)
+rl_base_alpha   = input.float(0.10, "Learning Rate α (0.05-0.30)",           minval=0.01, maxval=0.5,  step=0.01,  group=grp_rl)
+rl_alpha_decay  = input.float(0.01, "α Decay per Visit",                     minval=0.001,maxval=0.1,  step=0.001, group=grp_rl)
+rl_eps_start    = input.float(0.30, "Epsilon Start (exploration)",            minval=0.1,  maxval=1.0,  step=0.05,  group=grp_rl)
+rl_eps_min      = input.float(0.05, "Epsilon Minimum (exploitation floor)",   minval=0.01, maxval=0.2,  step=0.01,  group=grp_rl)
+rl_eps_decay    = input.int(200,    "Epsilon Decay Over N Sessions",          minval=50,   maxval=1000,             group=grp_rl)
+rl_min_visits   = input.int(10,     "Min Visits for Reliable Signal",         minval=3,    maxval=50,               group=grp_rl)
+rl_show_chart   = input.bool(true,  "Show Agent Label on Chart",              group=grp_rl)
+
+// ── Q-Table: 72 states × 3 actions = 216 values ──
+var array<float> rl_q      = array.new<float>(216, 0.0)
+var array<int>   rl_visits = array.new<int>(72, 0)
+
+// Inject pre-trained weights (2026-03-04, 1255 NQ sessions)
+if barstate.isfirst
+    array.set(rl_q, 0, -0.269041),  array.set(rl_q, 1, -0.030928)
+    array.set(rl_q, 6, -0.187342),  array.set(rl_q, 9, -0.165087)
+    array.set(rl_q, 10, -0.184840), array.set(rl_q, 18, -0.066215)
+    array.set(rl_q, 19, -0.266185), array.set(rl_q, 25, -0.189109)
+    array.set(rl_q, 27, -0.081178), array.set(rl_q, 28, -0.166490)
+    array.set(rl_q, 33, 0.148515),  array.set(rl_q, 34, -0.091953)
+    array.set(rl_q, 36, -0.053552), array.set(rl_q, 37, -0.164715)
+    array.set(rl_q, 42, -0.050000), array.set(rl_q, 45, -0.268701)
+    array.set(rl_q, 46, 0.711333),  array.set(rl_q, 51, -0.050000)
+    array.set(rl_q, 54, -0.182067), array.set(rl_q, 55, 0.144231)
+    array.set(rl_q, 56, 0.009901),  array.set(rl_q, 63, -0.094554)
+    array.set(rl_q, 64, -0.137065), array.set(rl_q, 65, 0.009615)
+    array.set(rl_q, 72, 0.492993),  array.set(rl_q, 73, -0.136706)
+    array.set(rl_q, 74, 0.018477),  array.set(rl_q, 82, -0.049020)
+    array.set(rl_q, 83, 0.026784),  array.set(rl_q, 90, 0.053388)
+    array.set(rl_q, 91, -0.050000), array.set(rl_q, 99, -0.050000)
+    array.set(rl_q, 100, 0.147059), array.set(rl_q, 101, 0.018648)
+    array.set(rl_q, 108, -0.244557),array.set(rl_q, 109, -0.194091)
+    array.set(rl_q, 110, -0.192727),array.set(rl_q, 117, 0.296538)
+    array.set(rl_q, 118, -0.134236),array.set(rl_q, 119, -0.076914)
+    array.set(rl_q, 126, 0.718191), array.set(rl_q, 127, -0.257324)
+    array.set(rl_q, 128, -0.086575),array.set(rl_q, 135, -0.314092)
+    array.set(rl_q, 136, -0.129208),array.set(rl_q, 138, -0.100000)
+    array.set(rl_q, 144, -0.246169),array.set(rl_q, 145, -0.113674)
+    array.set(rl_q, 148, 0.084935), array.set(rl_q, 153, -0.006845)
+    array.set(rl_q, 154, -0.129128),array.set(rl_q, 156, 0.085644)
+    array.set(rl_q, 157, -0.092804),array.set(rl_q, 162, -0.014525)
+    array.set(rl_q, 163, -0.392975),array.set(rl_q, 165, -0.094118)
+    array.set(rl_q, 171, 0.024080), array.set(rl_q, 172, -0.171215)
+    array.set(rl_q, 174, -0.050000),array.set(rl_q, 175, -0.049505)
+    array.set(rl_q, 180, -0.203399),array.set(rl_q, 181, -0.039606)
+    array.set(rl_q, 184, -0.049505),array.set(rl_q, 189, -0.163534)
+    array.set(rl_q, 190, -0.209282),array.set(rl_q, 191, -0.150169)
+    array.set(rl_q, 198, -0.172120),array.set(rl_q, 199, -0.283695)
+    array.set(rl_q, 200, -0.123644),array.set(rl_q, 207, -0.250711)
+    array.set(rl_q, 208, 0.955374), array.set(rl_q, 209, -0.051159)
+
+    array.set(rl_visits, 0, 136),   array.set(rl_visits, 2, 3)
+    array.set(rl_visits, 3, 58),    array.set(rl_visits, 6, 143)
+    array.set(rl_visits, 8, 2),     array.set(rl_visits, 9, 164)
+    array.set(rl_visits, 11, 6),    array.set(rl_visits, 12, 54)
+    array.set(rl_visits, 14, 1),    array.set(rl_visits, 15, 164)
+    array.set(rl_visits, 17, 1),    array.set(rl_visits, 18, 5)
+    array.set(rl_visits, 21, 5),    array.set(rl_visits, 24, 11)
+    array.set(rl_visits, 27, 4),    array.set(rl_visits, 30, 3)
+    array.set(rl_visits, 33, 4),    array.set(rl_visits, 36, 58)
+    array.set(rl_visits, 39, 47),   array.set(rl_visits, 42, 57)
+    array.set(rl_visits, 45, 36),   array.set(rl_visits, 46, 2)
+    array.set(rl_visits, 48, 27),   array.set(rl_visits, 49, 4)
+    array.set(rl_visits, 51, 41),   array.set(rl_visits, 52, 5)
+    array.set(rl_visits, 54, 43),   array.set(rl_visits, 55, 4)
+    array.set(rl_visits, 57, 26),   array.set(rl_visits, 58, 2)
+    array.set(rl_visits, 60, 49),   array.set(rl_visits, 61, 2)
+    array.set(rl_visits, 63, 43),   array.set(rl_visits, 66, 17)
+    array.set(rl_visits, 69, 28)
+
+var float rl_eps    = rl_eps_start
+var int   rl_sess   = 0
+var int   rl_last_state    = -1
+var int   rl_last_action   = -1
+var float rl_last_ny_price = na
+var float rl_last_lon_h    = na
+var float rl_last_lon_l    = na
+var float rl_last_s_pen    = na
+var bool  rl_last_bias_bull = false
+
+rl_confluence(p_bias_bull, nine_rdy, nine_b, ib_lkd, ib_up) =>
+    int score = 0
+    if nine_rdy
+        score += (p_bias_bull == nine_b) ? 1 : 0
+    if ib_lkd
+        score += (p_bias_bull == ib_up) ? 1 : 0
+    score
+
+rl_rth_ctx(out_prth, above_prth, p_bias_bull) =>
+    int ctx = 0
+    if out_prth
+        ctx := (above_prth == p_bias_bull) ? 1 : 2
+    ctx
+
+rl_state_idx(p, abv, conf, rth_c) =>
+    (p - 1) * 18 + (abv ? 0 : 1) * 9 + conf * 3 + rth_c
+
+rl_q_idx(state, action) =>
+    state * 3 + action
+
+rl_choose_action(state_i) =>
+    int action = 2
+    if math.random() < rl_eps
+        action := math.floor(math.random() * 3)
+    else
+        float q0 = array.get(rl_q, rl_q_idx(state_i, 0))
+        float q1 = array.get(rl_q, rl_q_idx(state_i, 1))
+        float q2 = array.get(rl_q, rl_q_idx(state_i, 2))
+        if q0 >= q1 and q0 >= q2
+            action := 0
+        else if q1 >= q0 and q1 >= q2
+            action := 1
+        else
+            action := 2
+    action
+
+rl_update(state_i, action_i, reward) =>
+    int   q_i    = rl_q_idx(state_i, action_i)
+    int   visits = array.get(rl_visits, state_i)
+    float alpha  = rl_base_alpha / (1.0 + visits * rl_alpha_decay)
+    float q_old  = array.get(rl_q, q_i)
+    array.set(rl_q, q_i, q_old + alpha * (reward - q_old))
+    array.set(rl_visits, state_i, visits + 1)
+
+rl_reward(hi_sw, lo_sw, both_sw, bias_b, pen_hi, pen_lo, med_pen, tier, action) =>
+    float r = 0.0
+    if action == 2
+        r := tier == 1 ? -0.2 : tier == 3 ? 0.1 : 0.0
+    else
+        bool correct = not both_sw and (action == 0 ?
+             (hi_sw and not lo_sw) or (hi_sw and lo_sw and pen_hi > pen_lo) :
+             (lo_sw and not hi_sw) or (lo_sw and hi_sw and pen_lo > pen_hi))
+        bool pen_hit = action == 0 ? pen_hi >= med_pen : pen_lo >= med_pen
+        r := both_sw ? -0.5 : correct and pen_hit ? 1.5 : correct ? 1.0 : -1.0
+    r
+
+rl_conf_str(visits) =>
+    visits >= 30 ? "HIGH" : visits >= rl_min_visits ? "MED" : "LOW"
+
+rl_conf_col(visits) =>
+    visits >= 30 ? color.lime : visits >= rl_min_visits ? color.yellow : color.orange
+
+rl_action_str(a) =>
+    switch a
+        0 => "LONG"
+        1 => "SHORT"
+        2 => "SKIP"
+        => "—"
+
+rl_action_col(a) =>
+    switch a
+        0 => color.lime
+        1 => color.red
+        2 => color.gray
+        => color.gray
+
+var int   rl_curr_state  = -1
+var int   rl_curr_action = -1
+var float rl_q_long      = na
+var float rl_q_short     = na
+var float rl_q_skip      = na
+
+// Step 1: US close — update Q-table
+if us_close_bar and rl_enabled and rl_last_state >= 0
+    float r = rl_reward(hi_swept, lo_swept, both_swpt, rl_last_bias_bull,
+         hi_pen, lo_pen, nz(rl_last_s_pen, 30.0), nz(s_tier, 2), rl_last_action)
+    rl_update(rl_last_state, rl_last_action, r)
+    rl_eps  := math.max(rl_eps_min, rl_eps_start * math.pow(1.0 - 1.0 / rl_eps_decay, rl_sess))
+    rl_sess := rl_sess + 1
+
+// Step 2: NY open — compute state, choose action
+if ny_open_bar and rl_enabled and pat > 0 and not na(s_tier)
+    int conf   = rl_confluence(bias_bull, prev_nine_ready, prev_nine_bull, prev_ib_locked, prev_ib_upper)
+    int rth_c  = rl_rth_ctx(rth_out_prth, rth_above_prth, bias_bull)
+    int si     = rl_state_idx(pat, above_mid, conf, rth_c)
+    int visits = array.get(rl_visits, si)
+    int action = visits >= rl_min_visits or rl_sess == 0 ? rl_choose_action(si) : (bias_bull ? 0 : 1)
+
+    rl_curr_state   := si
+    rl_curr_action  := action
+    rl_q_long       := array.get(rl_q, rl_q_idx(si, 0))
+    rl_q_short      := array.get(rl_q, rl_q_idx(si, 1))
+    rl_q_skip       := array.get(rl_q, rl_q_idx(si, 2))
+    rl_last_state   := si
+    rl_last_action  := action
+    rl_last_ny_price := close
+    rl_last_lon_h   := lon_h_lk
+    rl_last_lon_l   := lon_l_lk
+    rl_last_s_pen   := s_pen
+    rl_last_bias_bull := bias_bull
+
+// ── RL label on chart ──
+var label rl_lbl = na
+if ny_open_bar and rl_enabled and rl_show_chart and rl_curr_action >= 0
+    label.delete(rl_lbl)
+    int    visits  = array.get(rl_visits, rl_curr_state)
+    color  act_c   = rl_action_col(rl_curr_action)
+    // Offset SKIP label above bar to avoid price overlap
+    float  rl_y    = rl_curr_action == 2 ? high + atr14 * 0.3 : close
+    rl_lbl := label.new(bar_index, rl_y,
+         text      = "RL: " + rl_action_str(rl_curr_action) + "\n" +
+                     rl_conf_str(visits) + " (" + str.tostring(visits) + "x)\n" +
+                     "e=" + str.tostring(rl_eps, "#.##"),
+         color     = color.new(act_c, 35), textcolor=color.white,
+         style     = rl_curr_action == 0 ? label.style_label_up : rl_curr_action == 1 ? label.style_label_down : label.style_label_up,
+         size      = size.normal,
+         yloc      = rl_curr_action == 0 ? yloc.belowbar : rl_curr_action == 1 ? yloc.abovebar : yloc.price)
+
+
+// ─────────────────────────────────────────────────────────────
+// MASTER SIGNAL  (combined RL + Willingness + Tier + Confluence)
+//
+// Score 0-5 at NY open — updates live during US session
+//   +1 RL action agrees with stat bias (not SKIP)
+//   +1 Willingness = GO
+//   +1 Tier 1 or 2
+//   +1 IB position agrees with bias (prev_ib_locked)
+//   +1 9AM direction agrees with bias (prev_nine_ready)
+//
+// STRONG  (>=4): high-conviction signal
+// CONFIRM (3):   moderate signal
+// WEAK    (<=2): low-conviction — trade small or skip
+// ─────────────────────────────────────────────────────────────
+var int master_score = 0
+var int master_bull_score = 0
+var int master_bear_score = 0
+
+if ny_open_bar and pat > 0 and not na(s_tier)
+    int bull_pts = 0
+    int bear_pts = 0
+
+    // +1 RL agrees
+    if rl_curr_action == 0
+        bull_pts := bull_pts + 1
+    else if rl_curr_action == 1
+        bear_pts := bear_pts + 1
+
+    // +1 Tier 1 or 2
+    if s_tier <= 2
+        if bias_bull
+            bull_pts := bull_pts + 1
+        else
+            bear_pts := bear_pts + 1
+
+    // +1 IB agrees (previous day)
+    if prev_ib_locked
+        if prev_ib_upper == bias_bull
+            if bias_bull
+                bull_pts := bull_pts + 1
+            else
+                bear_pts := bear_pts + 1
+
+    // +1 9AM agrees (previous day)
+    if prev_nine_ready
+        if prev_nine_bull == bias_bull
+            if bias_bull
+                bull_pts := bull_pts + 1
+            else
+                bear_pts := bear_pts + 1
+
+    master_bull_score := bull_pts
+    master_bear_score := bear_pts
+    master_score      := bias_bull ? bull_pts : bear_pts
+
+// Update master score with live willingness GO (+1 when achieved)
+if in_us and will_status == 1 and will_status[1] != 1
+    if bias_bull
+        master_bull_score := master_bull_score + 1
+        master_score      := master_bull_score
+    else
+        master_bear_score := master_bear_score + 1
+        master_score      := master_bear_score
+
+master_strength() =>
+    master_score >= 4 ? "STRONG" : master_score == 3 ? "CONFIRM" : "WEAK"
+
+master_col() =>
+    color mc = master_score >= 4 ? (bias_bull ? color.lime : color.red) : master_score == 3 ? color.yellow : color.gray
+    mc
+
+
+// ─────────────────────────────────────────────────────────────
+// DASHBOARD  (top-right, 2 cols × 32 rows)
+// ─────────────────────────────────────────────────────────────
+var table dash = na
+
+if show_dashboard and barstate.islast
+    table.delete(dash)
+
+    color bg_main = dark_theme ? color.new(#0d0d1a, 8)  : color.new(color.white, 8)
+    color bg_hdr  = dark_theme ? color.new(#1a1a2e, 5)  : color.new(#e0e0f0, 5)
+    color bg_row  = dark_theme ? color.new(#0d0d1a, 15) : color.new(color.white, 3)
+    color fg_main = dark_theme ? color.new(color.white, 15) : color.new(#111111, 0)
+    color fg_dim  = dark_theme ? color.new(color.gray, 20)  : color.new(#666666, 0)
+
+    dash = table.new(position.top_right, 2, 33,
+         bgcolor=bg_main, border_width=1,
+         border_color=color.new(color.gray, 75))
+
+    int r = 0
+
+    // ── Header ──
+    table.cell(dash, 0, r, "NY OPEN EDGE  v4.1  [NQ]",
+         text_color=color.white, bgcolor=color.new(#1a1a2e, 0),
+         text_size=size.small, text_halign=text.align_center)
+    table.merge_cells(dash, 0, r, 1, r)
+    r := r + 1
+
+    // ── Session ──
+    string sess_str = in_us ? "US Session" : in_london ? "London" : in_asia ? "Asia" : "Closed"
+    color  sess_c   = in_us ? color.lime : in_london ? color.orange : in_asia ? color.blue : fg_dim
+    table.cell(dash, 0, r, "Session",   text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, sess_str,    text_color=sess_c,  text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── Pattern ──
+    table.cell(dash, 0, r, "Pattern",   text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, pat > 0 ? pat_long(pat) : "—", text_color=fg_main, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── Mid position ──
+    table.cell(dash, 0, r, "Mid Pos.",  text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    color mid_c = above_mid ? col_bull_c : col_bear_c
+    table.cell(dash, 1, r, not na(lon_mid_lk) ? (above_mid ? "Above London Mid" : "Below London Mid") : "—",
+         text_color=mid_c, text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── Bias ──
+    table.cell(dash, 0, r, "Stat Bias", text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    color bias_c = bias_bull ? col_bull_c : col_bear_c
+    table.cell(dash, 1, r, not na(s_hi) ? (bias_bull ? "BULL  " + str.tostring(s_hi,"#.#") + "%" : "BEAR  " + str.tostring(s_lo,"#.#") + "%") : "—",
+         text_color=bias_c, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── Tier ──
+    table.cell(dash, 0, r, "Edge Tier", text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, not na(s_tier) ? tier_str(s_tier) : "—",
+         text_color=not na(s_tier) ? tier_col(s_tier) : fg_dim, text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── Fail rate ──
+    table.cell(dash, 0, r, "Fail Rate", text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    color fr_c = not na(s_fail) ? (s_fail > 50 ? color.red : s_fail > 40 ? color.yellow : color.lime) : fg_dim
+    table.cell(dash, 1, r, not na(s_fail) ? str.tostring(s_fail,"#.#") + "%" : "—",
+         text_color=fr_c, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── Sample ──
+    table.cell(dash, 0, r, "Sample",    text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, not na(s_n) ? str.tostring(s_n) + " sessions" : "—",
+         text_color=fg_main, text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── Median penetration ──
+    table.cell(dash, 0, r, "Med. Pen.", text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, not na(s_pen) ? str.tostring(s_pen,"#") + " pts" : "—",
+         text_color=col_target_c, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── MASTER SIGNAL separator ──
+    table.cell(dash, 0, r, "  MASTER SIGNAL  ",
+         text_color=fg_dim, bgcolor=bg_hdr, text_size=size.tiny, text_halign=text.align_center)
+    table.merge_cells(dash, 0, r, 1, r)
+    r := r + 1
+
+    // ── Master strength ──
+    table.cell(dash, 0, r, "Strength",  text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, pat > 0 ? master_strength() : "—",
+         text_color=master_col(), text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── Master score ──
+    table.cell(dash, 0, r, "Score",     text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, pat > 0 ? str.tostring(master_score) + " / 5" : "—",
+         text_color=master_col(), text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── WILLINGNESS separator ──
+    table.cell(dash, 0, r, "  WILLINGNESS  ",
+         text_color=fg_dim, bgcolor=bg_row, text_size=size.tiny, text_halign=text.align_center)
+    table.merge_cells(dash, 0, r, 1, r)
+    r := r + 1
+
+    // ── Will signal ──
+    table.cell(dash, 0, r, "Signal",    text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, show_will ? will_status_str() : "Off",
+         text_color=show_will ? will_status_col() : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── Will score ──
+    table.cell(dash, 0, r, "W1-W4",     text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, show_will ? will_score_str() : "—",
+         text_color=fg_main, text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── RL AGENT separator ──
+    table.cell(dash, 0, r, "  RL AGENT  ",
+         text_color=fg_dim, bgcolor=bg_hdr, text_size=size.tiny, text_halign=text.align_center)
+    table.merge_cells(dash, 0, r, 1, r)
+    r := r + 1
+
+    // ── RL action ──
+    table.cell(dash, 0, r, "Action",    text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, rl_enabled and rl_curr_action >= 0 ? rl_action_str(rl_curr_action) : "—",
+         text_color=rl_enabled and rl_curr_action >= 0 ? rl_action_col(rl_curr_action) : fg_dim,
+         text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── Q-values ──
+    table.cell(dash, 0, r, "Q(L/S/–)",  text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    string q_str = rl_enabled and not na(rl_q_long) ?
+         str.tostring(rl_q_long,"#.##") + " / " + str.tostring(rl_q_short,"#.##") + " / " + str.tostring(rl_q_skip,"#.##") : "—"
+    table.cell(dash, 1, r, q_str, text_color=fg_main, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── RL confidence ──
+    int rl_v = rl_curr_state >= 0 ? array.get(rl_visits, rl_curr_state) : 0
+    table.cell(dash, 0, r, "Confidence",text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, rl_enabled ? rl_conf_str(rl_v) + " (" + str.tostring(rl_v) + "x)" : "—",
+         text_color=rl_enabled ? rl_conf_col(rl_v) : fg_dim, text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── Epsilon ──
+    table.cell(dash, 0, r, "e / Sess.", text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, rl_enabled ? str.tostring(rl_eps,"#.###") + " / " + str.tostring(rl_sess) : "—",
+         text_color=fg_main, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── LIVE SWEEP separator ──
+    table.cell(dash, 0, r, "  LIVE SWEEP  ",
+         text_color=fg_dim, bgcolor=bg_row, text_size=size.tiny, text_halign=text.align_center)
+    table.merge_cells(dash, 0, r, 1, r)
+    r := r + 1
+
+    // ── High swept ──
+    table.cell(dash, 0, r, "High Swept",text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, show_live ? (hi_swept ? "Yes  +" + str.tostring(hi_pen,"#.#") + "pt" : "—") : "Off",
+         text_color=hi_swept ? col_bull_c : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── Low swept ──
+    table.cell(dash, 0, r, "Low Swept", text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, show_live ? (lo_swept ? "Yes  +" + str.tostring(lo_pen,"#.#") + "pt" : "—") : "Off",
+         text_color=lo_swept ? col_bear_c : fg_dim, text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── Failure ──
+    table.cell(dash, 0, r, "Failure",   text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, both_swpt ? "Both Swept" : "—",
+         text_color=both_swpt ? color.orange : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── NQ STATS separator ──
+    table.cell(dash, 0, r, "  NQ STATS  ",
+         text_color=fg_dim, bgcolor=bg_row, text_size=size.tiny, text_halign=text.align_center)
+    table.merge_cells(dash, 0, r, 1, r)
+    r := r + 1
+
+    // ── IB direction ──
+    table.cell(dash, 0, r, "IB Dir.",   text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, ib_locked ? (ib_upper ? "Upper  81%" : "Lower  74%") : "—",
+         text_color=ib_locked ? (ib_upper ? col_bull_c : col_bear_c) : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── 9AM continuation ──
+    table.cell(dash, 0, r, "9AM Cont.", text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, nine_ready ? (nine_bull ? "Bull  70%" : "Bear  70%") : "—",
+         text_color=nine_ready ? (nine_bull ? col_bull_c : col_bear_c) : fg_dim, text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── RTH vs pRTH ──
+    table.cell(dash, 0, r, "vs pRTH",  text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    string prth_str = not na(prth_h) ? (rth_out_prth ? (rth_above_prth ? "Above  83%" : "Below  83%") : "Inside  73%") : "—"
+    color  prth_c   = not na(prth_h) ? (rth_out_prth ? color.fuchsia : fg_main) : fg_dim
+    table.cell(dash, 1, r, prth_str, text_color=prth_c, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── RTH Continuation ──
+    table.cell(dash, 0, r, "RTH Cont.", text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, show_rthcont ? jd_result_str() : "Off",
+         text_color=show_rthcont ? jd_result_col() : fg_dim, text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── ICT Judas ──
+    table.cell(dash, 0, r, "ICT Judas", text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, show_ict_judas ? ict_status_str() : "Off",
+         text_color=show_ict_judas ? ict_status_col() : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── ACCURACY separator ──
+    table.cell(dash, 0, r, "  ACCURACY  ",
+         text_color=fg_dim, bgcolor=bg_row, text_size=size.tiny, text_halign=text.align_center)
+    table.merge_cells(dash, 0, r, 1, r)
+    r := r + 1
+
+    // ── Hit rate ──
+    color hr_c = hit_rate >= 65 ? color.lime : hit_rate >= 55 ? color.yellow : color.red
+    table.cell(dash, 0, r, "Hit Rate",  text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, show_rolling and acc_total > 0 ?
+         str.tostring(hit_rate) + "%  (" + str.tostring(acc_wins) + "/" + str.tostring(acc_total) + ")" : "—",
+         text_color=show_rolling ? hr_c : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── Streak ──
+    color streak_c = streak > 0 ? color.lime : streak < 0 ? color.red : fg_dim
+    table.cell(dash, 0, r, "Streak",    text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, show_rolling ? str.tostring(math.abs(streak)) + (streak > 0 ? " wins" : " losses") : "—",
+         text_color=streak_c, text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+
+// ─────────────────────────────────────────────────────────────
+// NQ STATS REFERENCE TABLE  (bottom-left)
+// Sorted by edge strength (Tier 1 first)
+// ─────────────────────────────────────────────────────────────
+var table stats_tbl = na
+
+if show_stat_tbl and barstate.islast
+    table.delete(stats_tbl)
+
+    color bg_s  = dark_theme ? color.new(#0d0d1a, 10) : color.new(color.white, 8)
+    color bg_sh = color.new(#1a1a2e, 5)
+    color fg_s  = dark_theme ? color.new(color.white, 20) : color.new(#111111, 0)
+    color fg_d  = color.new(color.gray, 30)
+
+    stats_tbl = table.new(position.bottom_left, 5, 11,
+         bgcolor=bg_s, border_width=1, border_color=color.new(color.gray, 78))
+
+    // Header row
+    table.cell(stats_tbl, 0, 0, "Pat",  text_color=color.white, bgcolor=bg_sh, text_size=size.tiny)
+    table.cell(stats_tbl, 1, 0, "Mid",  text_color=color.white, bgcolor=bg_sh, text_size=size.tiny)
+    table.cell(stats_tbl, 2, 0, "Hi%",  text_color=color.white, bgcolor=bg_sh, text_size=size.tiny)
+    table.cell(stats_tbl, 3, 0, "Lo%",  text_color=color.white, bgcolor=bg_sh, text_size=size.tiny)
+    table.cell(stats_tbl, 4, 0, "Tier", text_color=color.white, bgcolor=bg_sh, text_size=size.tiny)
+
+    // Row 1: P3 above mid — Tier 1 Bull (strongest bull edge)
+    color t1b = color.new(color.lime, 88)
+    table.cell(stats_tbl, 0, 1, "P3", text_color=fg_s, text_size=size.tiny, bgcolor=t1b)
+    table.cell(stats_tbl, 1, 1, "↑",  text_color=col_bull_c, text_size=size.tiny, bgcolor=t1b)
+    table.cell(stats_tbl, 2, 1, "78%",text_color=col_bull_c, text_size=size.tiny, bgcolor=t1b)
+    table.cell(stats_tbl, 3, 1, "22%",text_color=fg_d, text_size=size.tiny, bgcolor=t1b)
+    table.cell(stats_tbl, 4, 1, "T1", text_color=color.lime, text_size=size.tiny, bgcolor=t1b)
+
+    // Row 2: P4 below mid — Tier 1 Bear (strongest bear edge)
+    color t1r = color.new(color.red, 88)
+    table.cell(stats_tbl, 0, 2, "P4", text_color=fg_s, text_size=size.tiny, bgcolor=t1r)
+    table.cell(stats_tbl, 1, 2, "↓",  text_color=col_bear_c, text_size=size.tiny, bgcolor=t1r)
+    table.cell(stats_tbl, 2, 2, "18%",text_color=fg_d, text_size=size.tiny, bgcolor=t1r)
+    table.cell(stats_tbl, 3, 2, "82%",text_color=col_bear_c, text_size=size.tiny, bgcolor=t1r)
+    table.cell(stats_tbl, 4, 2, "T1", text_color=color.red, text_size=size.tiny, bgcolor=t1r)
+
+    // Row 3: P1 above mid — Tier 2
+    table.cell(stats_tbl, 0, 3, "P1", text_color=fg_s, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 1, 3, "↑",  text_color=col_bull_c, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 2, 3, "58%",text_color=col_bull_c, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 3, 3, "42%",text_color=fg_d, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 4, 3, "T2", text_color=color.yellow, text_size=size.tiny, bgcolor=bg_s)
+
+    // Row 4: P1 below mid — Tier 2
+    table.cell(stats_tbl, 0, 4, "P1", text_color=fg_s, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 1, 4, "↓",  text_color=col_bear_c, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 2, 4, "44%",text_color=fg_d, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 3, 4, "56%",text_color=col_bear_c, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 4, 4, "T2", text_color=color.yellow, text_size=size.tiny, bgcolor=bg_s)
+
+    // Row 5: P3 below mid — Tier 2
+    table.cell(stats_tbl, 0, 5, "P3", text_color=fg_s, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 1, 5, "↓",  text_color=col_bear_c, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 2, 5, "55%",text_color=fg_d, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 3, 5, "45%",text_color=col_bear_c, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 4, 5, "T2", text_color=color.yellow, text_size=size.tiny, bgcolor=bg_s)
+
+    // Row 6: P4 above mid — Tier 2
+    table.cell(stats_tbl, 0, 6, "P4", text_color=fg_s, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 1, 6, "↑",  text_color=col_bull_c, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 2, 6, "47%",text_color=fg_d, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 3, 6, "53%",text_color=col_bear_c, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 4, 6, "T2", text_color=color.yellow, text_size=size.tiny, bgcolor=bg_s)
+
+    // Row 7: P2 above mid — Tier 3
+    color t3 = color.new(color.orange, 90)
+    table.cell(stats_tbl, 0, 7, "P2", text_color=fg_s, text_size=size.tiny, bgcolor=t3)
+    table.cell(stats_tbl, 1, 7, "↑",  text_color=col_bull_c, text_size=size.tiny, bgcolor=t3)
+    table.cell(stats_tbl, 2, 7, "60%",text_color=col_bull_c, text_size=size.tiny, bgcolor=t3)
+    table.cell(stats_tbl, 3, 7, "40%",text_color=fg_d, text_size=size.tiny, bgcolor=t3)
+    table.cell(stats_tbl, 4, 7, "T3", text_color=color.orange, text_size=size.tiny, bgcolor=t3)
+
+    // Row 8: P2 below mid — Tier 3
+    table.cell(stats_tbl, 0, 8, "P2", text_color=fg_s, text_size=size.tiny, bgcolor=t3)
+    table.cell(stats_tbl, 1, 8, "↓",  text_color=col_bear_c, text_size=size.tiny, bgcolor=t3)
+    table.cell(stats_tbl, 2, 8, "38%",text_color=fg_d, text_size=size.tiny, bgcolor=t3)
+    table.cell(stats_tbl, 3, 8, "62%",text_color=col_bear_c, text_size=size.tiny, bgcolor=t3)
+    table.cell(stats_tbl, 4, 8, "T3", text_color=color.orange, text_size=size.tiny, bgcolor=t3)
+
+    // Row 9: Active row highlight (current pattern)
+    string cur_pat_str = pat > 0 ? (pat == 1 ? "P1" : pat == 2 ? "P2" : pat == 3 ? "P3" : "P4") + (above_mid ? " ↑" : " ↓") : "—"
+    table.cell(stats_tbl, 0, 9, "Active",   text_color=fg_d, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 1, 9, cur_pat_str,text_color=bias_bull ? col_bull_c : col_bear_c, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 2, 9, not na(s_hi) ? str.tostring(s_hi,"#") + "%" : "—",
+         text_color=fg_s, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 3, 9, not na(s_lo) ? str.tostring(s_lo,"#") + "%" : "—",
+         text_color=fg_s, text_size=size.tiny, bgcolor=bg_s)
+    table.cell(stats_tbl, 4, 9, not na(s_tier) ? "T" + str.tostring(s_tier) : "—",
+         text_color=not na(s_tier) ? tier_col(s_tier) : fg_d, text_size=size.tiny, bgcolor=bg_s)
+
+    // Row 10: Source footnote
+    table.cell(stats_tbl, 0, 10, "NYOpenEdge 5yr + nqstats.com 10yr",
+         text_color=color.new(color.gray, 45), text_size=size.tiny, text_halign=text.align_left, bgcolor=bg_s)
+    table.merge_cells(stats_tbl, 0, 10, 4, 10)
+
+// ─────────────────────────────────────────────────────────────
+// ALERT CONDITIONS
+// Note: messages are const strings per Pine v6 requirement.
+// Use {{ticker}} and {{close}} placeholders for dynamic values.
+// ─────────────────────────────────────────────────────────────
+alertcondition(ny_open_bar and alert_ny_open,
+     title="NY Open Edge: Signal",
+     message="NY Open Edge v4.1 — check dashboard for pattern, bias and tier  [{{ticker}} {{interval}}]")
+
+alertcondition(hi_sweep_new and alert_sweep,
+     title="NY Open Edge: High Swept",
+     message="London HIGH level swept — {{ticker}}  price={{close}}")
+
+alertcondition(lo_sweep_new and alert_sweep,
+     title="NY Open Edge: Low Swept",
+     message="London LOW level swept — {{ticker}}  price={{close}}")
+
+alertcondition(both_swpt and not both_swpt[1] and alert_failure,
+     title="NY Open Edge: Failure (Both Swept)",
+     message="FAILURE — both London levels swept, no clean direction  [{{ticker}}]")
+
+alertcondition(will_status == 1 and will_status[1] != 1 and alert_will_go,
+     title="NY Open Edge: Willingness GO",
+     message="Willingness GO signal confirmed — check RL action and master score  [{{ticker}}]")
+
+alertcondition(rl_curr_action == 0 and ny_open_bar and rl_enabled,
+     title="NY Open Edge: RL LONG",
+     message="RL Agent action: LONG — check confidence and master score  [{{ticker}}]")
+
+alertcondition(rl_curr_action == 1 and ny_open_bar and rl_enabled,
+     title="NY Open Edge: RL SHORT",
+     message="RL Agent action: SHORT — check confidence and master score  [{{ticker}}]")
+
