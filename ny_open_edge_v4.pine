@@ -67,6 +67,8 @@ alert_ny_open  = input.bool(true, "NY Open Alert (08:00 ET)",               grou
 alert_sweep    = input.bool(true, "Sweep Alert",                             group=grp_alert)
 alert_failure  = input.bool(true, "Failure Alert (both sides swept)",        group=grp_alert)
 alert_will_go  = input.bool(true, "Willingness GO Alert",                    group=grp_alert)
+alert_will_nogo = input.bool(true, "Willingness NO-GO Alert",                 group=grp_alert)
+alert_rth_ext  = input.bool(true, "RTH Extended Confirmation Alert (12pm)",   group=grp_alert)
 
 
 // ─────────────────────────────────────────────────────────────
@@ -324,8 +326,9 @@ var array<int> acc_ring   = array.new<int>(100, -1)
 var int        acc_ring_i = 0
 var int        streak     = 0
 var bool       last_win   = false
-var int        acc_wins   = 0   // kept for all-time display
-var int        acc_total  = 0
+var int        acc_wins   = 0   // correct predictions
+var int        acc_both   = 0   // both-swept sessions (neutral, not counted as win or loss)
+var int        acc_total  = 0   // total evaluated (correct + wrong + both)
 
 // Compute rolling stats from ring buffer
 f_rolling_rate() =>
@@ -345,17 +348,22 @@ if us_close_bar and not na(s_hi)
          (pred_hi ?
               (hi_swept and not lo_swept) or (hi_swept and lo_swept and hi_pen > lo_pen) :
               (lo_swept and not hi_swept) or (lo_swept and hi_swept and lo_pen > hi_pen))
-    int outcome   = correct ? 1 : 0
-    array.set(acc_ring, acc_ring_i % math.min(rolling_lb, 100), outcome)
-    acc_ring_i := acc_ring_i + 1
-    if correct
-        acc_wins := acc_wins + 1
-        streak   := last_win ? streak + 1 : 1
-        last_win := true
+    // both_swpt = neutral outcome: do not score, but track separately
+    if both_swpt
+        acc_both  := acc_both + 1
+        acc_total := acc_total + 1
     else
-        streak   := last_win ? -1 : streak - 1
-        last_win := false
-    acc_total := acc_total + 1
+        int outcome = correct ? 1 : 0
+        array.set(acc_ring, acc_ring_i % math.min(rolling_lb, 100), outcome)
+        acc_ring_i := acc_ring_i + 1
+        if correct
+            acc_wins := acc_wins + 1
+            streak   := last_win ? streak + 1 : 1
+            last_win := true
+        else
+            streak   := last_win ? -1 : streak - 1
+            last_win := false
+        acc_total := acc_total + 1
 
 hit_rate = f_rolling_rate()
 
@@ -490,6 +498,8 @@ grp_will = "═══ Willingness Score ═══"
 show_will      = input.bool(true,  "Show Willingness Score",             group=grp_will)
 will_show_lbl  = input.bool(true,  "Show GO/WAIT/NO-GO label @ NY Open", group=grp_will)
 will_min_bars  = input.int(6,      "Bars to evaluate (after NY Open)",   minval=3, maxval=20, group=grp_will)
+will_w3_tol    = input.float(0.06, "W3 Structure tolerance (%)",         minval=0.01, maxval=0.5, step=0.01, group=grp_will,
+                 tooltip="How far price can move against NY open before W3 fails. Default 0.06% ≈ 12 NQ pts at 20,000.")
 col_will_go    = input.color(color.new(color.lime,   0), "GO color",    group=grp_will)
 col_will_wait  = input.color(color.new(color.yellow, 0), "WAIT color",  group=grp_will)
 col_will_nogo  = input.color(color.new(color.red,    0), "NO-GO color", group=grp_will)
@@ -555,9 +565,10 @@ if in_us and not ny_open_bar and not na(will_ny_price) and will_bars_seen < will
         will_momentum_bear := will_momentum_bear + 1
 
     if not na(will_ny_price)
-        if bias_bull and close < will_ny_price * 0.9998
+        float w3_frac = will_w3_tol / 100.0
+        if bias_bull and close < will_ny_price * (1.0 - w3_frac)
             will_w3_fail := true
-        if not bias_bull and close > will_ny_price * 1.0002
+        if not bias_bull and close > will_ny_price * (1.0 + w3_frac)
             will_w3_fail := true
 
     if not will_w4_done and not na(lon_mid_lk)
@@ -598,7 +609,8 @@ if in_us and not ny_open_bar and not na(will_ny_price) and will_bars_seen < will
     if will_bounce_bear
         will_score_bear := will_score_bear + 1
 
-if in_us and will_bars_seen == will_min_bars and show_will and pat > 0
+// Live status update — recalculate every bar during and after evaluation window
+if in_us and will_bars_seen >= will_min_bars and show_will and pat > 0
     int thresh    = will_thresh(pat, above_mid)
     int act_score = bias_bull ? will_score_bull : will_score_bear
     if act_score >= thresh
@@ -720,11 +732,13 @@ noon_start_bar = et_h == 11 and et_m == 30
 noon_end_bar   = et_h == 12 and et_m == 30
 if noon_start_bar and show_noon
     box.delete(box_noon)
-    box_noon := box.new(bar_index, high * 1.005, bar_index, low * 0.995,
+    box_noon := box.new(bar_index, high, bar_index, low,
          border_color=col_noon_c, bgcolor=col_noon_c, border_width=1, extend=extend.right)
 if show_noon and not na(box_noon)
     if in_noon and not noon_start_bar
-        box.set_right(box_noon, bar_index)
+        box.set_right(box_noon,   bar_index)
+        box.set_top(box_noon,     math.max(box.get_top(box_noon),    high))
+        box.set_bottom(box_noon,  math.min(box.get_bottom(box_noon), low))
     if noon_end_bar
         box.set_extend(box_noon, extend.none)
 
@@ -1034,7 +1048,7 @@ jd_result_str() =>
         2 => "False Swing"
         3 => "Ext. Cont."
         4 => "Ext. False"
-        => jd_phase1_set ? (jd_up_at_940 ? "Watching..." : "Watching...") : "Pre-9:40"
+        => jd_phase2_set ? "Neutral/Stall" : jd_phase1_set ? "Watching..." : "Pre-9:40"
 
 jd_result_col() =>
     switch jd_result
@@ -1595,14 +1609,22 @@ if ny_open_bar and pat > 0 and not na(s_tier)
     master_bear_score := bear_pts
     master_score      := bias_bull ? bull_pts : bear_pts
 
-// Update master score with live willingness GO (+1 when achieved)
-if in_us and will_status == 1 and will_status[1] != 1
-    if bias_bull
-        master_bull_score := master_bull_score + 1
-        master_score      := master_bull_score
-    else
-        master_bear_score := master_bear_score + 1
-        master_score      := master_bear_score
+// Update master score live with willingness result
+if in_us and will_status != will_status[1]
+    if will_status == 1  // GO confirmed: +1
+        if bias_bull
+            master_bull_score := master_bull_score + 1
+            master_score      := master_bull_score
+        else
+            master_bear_score := master_bear_score + 1
+            master_score      := master_bear_score
+    else if will_status == 3  // NO-GO: -1 (cap at 0)
+        if bias_bull
+            master_bull_score := math.max(0, master_bull_score - 1)
+            master_score      := master_bull_score
+        else
+            master_bear_score := math.max(0, master_bear_score - 1)
+            master_score      := master_bear_score
 
 master_strength() =>
     master_score >= 4 ? "STRONG" : master_score == 3 ? "CONFIRM" : "WEAK"
@@ -1626,7 +1648,7 @@ if show_dashboard and barstate.islast
     color fg_main = dark_theme ? color.new(color.white, 15) : color.new(#111111, 0)
     color fg_dim  = dark_theme ? color.new(color.gray, 20)  : color.new(#666666, 0)
 
-    dash = table.new(position.top_right, 2, 33,
+    dash = table.new(position.top_right, 2, 38,
          bgcolor=bg_main, border_width=1,
          border_color=color.new(color.gray, 75))
 
@@ -1714,16 +1736,61 @@ if show_dashboard and barstate.islast
     table.merge_cells(dash, 0, r, 1, r)
     r := r + 1
 
-    // ── Will signal ──
+    // ── Signal (GO / WAIT / NO-GO / Evaluating) ──
+    string will_eval_str = will_bars_seen > 0 and will_bars_seen < will_min_bars ?
+         "Eval " + str.tostring(will_bars_seen) + "/" + str.tostring(will_min_bars) + " bars" : will_status_str()
+    color will_eval_col = will_bars_seen > 0 and will_bars_seen < will_min_bars ? color.gray : will_status_col()
     table.cell(dash, 0, r, "Signal",    text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
-    table.cell(dash, 1, r, show_will ? will_status_str() : "Off",
-         text_color=show_will ? will_status_col() : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, show_will ? will_eval_str : "Off",
+         text_color=show_will ? will_eval_col : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
     r := r + 1
 
-    // ── Will score ──
-    table.cell(dash, 0, r, "W1-W4",     text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
-    table.cell(dash, 1, r, show_will ? will_score_str() : "—",
-         text_color=fg_main, text_size=size.tiny, bgcolor=bg_row)
+    // ── Score / threshold ──
+    int   will_thresh_now = pat > 0 ? will_thresh(pat, above_mid) : 2
+    int   will_act_now    = bias_bull ? will_score_bull : will_score_bear
+    string will_score_lbl = pat > 0 ? str.tostring(will_act_now) + " / " + str.tostring(will_thresh_now) +
+         (will_act_now >= will_thresh_now ? "  ✓" : will_act_now == will_thresh_now - 1 ? "  ~" : "  ✗") : "—"
+    color will_score_c = pat > 0 ? (will_act_now >= will_thresh_now ? col_will_go : will_act_now == will_thresh_now - 1 ? col_will_wait : col_will_nogo) : fg_dim
+    table.cell(dash, 0, r, "Score",     text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, show_will ? will_score_lbl : "—",
+         text_color=show_will ? will_score_c : fg_dim, text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── W1: Position vs London Mid ──
+    bool  w1_ok     = not na(lon_mid_lk) and (bias_bull ? will_ny_price > lon_mid_lk : will_ny_price < lon_mid_lk)
+    string w1_lbl   = not na(lon_mid_lk) ? (w1_ok ? "✓ " : "✗ ") + (bias_bull ? "Above" : "Below") + " Lon Mid" : "—"
+    table.cell(dash, 0, r, "W1 Position", text_color=fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, show_will ? w1_lbl : "—",
+         text_color=show_will ? (w1_ok ? col_will_go : col_will_nogo) : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── W2: Momentum (majority of bars in bias direction) ──
+    int   w2_req    = will_bars_seen >= 3 ? math.ceil(will_bars_seen * 0.5) : 0
+    int   w2_count  = bias_bull ? will_momentum_bull : will_momentum_bear
+    bool  w2_ok     = will_bars_seen >= 3 and w2_count >= w2_req
+    string w2_lbl   = will_bars_seen >= 3 ?
+         (w2_ok ? "✓ " : "✗ ") + str.tostring(w2_count) + "/" + str.tostring(will_bars_seen) + " bars" : "Waiting..."
+    table.cell(dash, 0, r, "W2 Momentum", text_color=fg_dim, text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, show_will ? w2_lbl : "—",
+         text_color=show_will ? (will_bars_seen < 3 ? fg_dim : w2_ok ? col_will_go : col_will_nogo) : fg_dim,
+         text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── W3: Structure (NY open price holding) ──
+    string w3_lbl = not na(will_ny_price) ? (not will_w3_fail ? "✓ Holding open" : "✗ Open broken") : "—"
+    table.cell(dash, 0, r, "W3 Structure", text_color=fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, show_will ? w3_lbl : "—",
+         text_color=show_will ? (not will_w3_fail ? col_will_go : col_will_nogo) : fg_dim,
+         text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── W4: London Mid bounce ──
+    bool  w4_ok   = bias_bull ? will_bounce_bull : will_bounce_bear
+    string w4_lbl = will_w4_done ? (w4_ok ? "✓ Bounced Lon Mid" : "✗ No bounce") : "— Watching Lon Mid"
+    table.cell(dash, 0, r, "W4 Bounce",   text_color=fg_dim, text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, show_will ? w4_lbl : "—",
+         text_color=show_will ? (not will_w4_done ? fg_dim : w4_ok ? col_will_go : col_will_nogo) : fg_dim,
+         text_size=size.tiny, bgcolor=bg_row)
     r := r + 1
 
     // ── RL AGENT separator ──
@@ -1826,11 +1893,12 @@ if show_dashboard and barstate.islast
     table.merge_cells(dash, 0, r, 1, r)
     r := r + 1
 
-    // ── Hit rate ──
+    // ── Hit rate (excludes both-swept from denominator) ──
+    int acc_decided = acc_total - acc_both
     color hr_c = hit_rate >= 65 ? color.lime : hit_rate >= 55 ? color.yellow : color.red
     table.cell(dash, 0, r, "Hit Rate",  text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
-    table.cell(dash, 1, r, show_rolling and acc_total > 0 ?
-         str.tostring(hit_rate) + "%  (" + str.tostring(acc_wins) + "/" + str.tostring(acc_total) + ")" : "—",
+    table.cell(dash, 1, r, show_rolling and acc_decided > 0 ?
+         str.tostring(hit_rate) + "%  (" + str.tostring(acc_wins) + "✓ " + str.tostring(acc_both) + "≈ " + str.tostring(acc_decided - acc_wins) + "✗)" : "—",
          text_color=show_rolling ? hr_c : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
     r := r + 1
 
@@ -1958,6 +2026,14 @@ alertcondition(both_swpt and not both_swpt[1] and alert_failure,
 alertcondition(will_status == 1 and will_status[1] != 1 and alert_will_go,
      title="NY Open Edge: Willingness GO",
      message="Willingness GO signal confirmed — check RL action and master score  [{{ticker}}]")
+
+alertcondition(will_status == 3 and will_status[1] != 3 and alert_will_nogo,
+     title="NY Open Edge: Willingness NO-GO",
+     message="Willingness NO-GO — setup invalidated, stand aside  [{{ticker}}]")
+
+alertcondition((jd_result == 3 or jd_result == 4) and (jd_result[1] != 3 and jd_result[1] != 4) and alert_rth_ext,
+     title="NY Open Edge: RTH Extended Confirmation",
+     message="RTH continuation confirmed at 12pm — extended signal active  [{{ticker}}]")
 
 alertcondition(rl_curr_action == 0 and ny_open_bar and rl_enabled,
      title="NY Open Edge: RL LONG",
