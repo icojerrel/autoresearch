@@ -48,6 +48,8 @@ show_stat_tbl    = input.bool(true,  "NQ Stats Reference Table (bottom-left)", g
 
 grp_live = "═══ Live Tracking ═══"
 show_live        = input.bool(true, "Live Sweep Status",                     group=grp_live)
+min_sweep_pts    = input.float(2.0, "Min Sweep Penetration (points)",        minval=0.0, maxval=20.0, step=0.5, group=grp_live,
+                   tooltip="Minimum pts a level must be breached to count as a sweep. Filters 1-tick noise. Default 2 pts for NQ.")
 show_rolling     = input.bool(true, "Rolling Accuracy",                      group=grp_live)
 rolling_lb       = input.int(20,    "Rolling Lookback (sessions)",           minval=5, maxval=100, group=grp_live)
 
@@ -304,12 +306,12 @@ hi_sweep_new := false
 lo_sweep_new := false
 
 if in_us and not na(lon_h_lk) and not na(lon_l_lk)
-    if high > lon_h_lk and not hi_swept
+    if high > lon_h_lk + min_sweep_pts and not hi_swept
         hi_swept     := true
         hi_sweep_new := true
     if high > lon_h_lk
         hi_pen := math.max(hi_pen, high - lon_h_lk)
-    if low < lon_l_lk and not lo_swept
+    if low < lon_l_lk - min_sweep_pts and not lo_swept
         lo_swept     := true
         lo_sweep_new := true
     if low < lon_l_lk
@@ -330,7 +332,7 @@ var int        acc_wins   = 0   // correct predictions
 var int        acc_both   = 0   // both-swept sessions (neutral, not counted as win or loss)
 var int        acc_total  = 0   // total evaluated (correct + wrong + both)
 
-// Compute rolling stats from ring buffer
+// Compute rolling stats from ring buffer — returns [hit_rate, roll_wins, roll_n]
 f_rolling_rate() =>
     int wins  = 0
     int total = 0
@@ -340,7 +342,8 @@ f_rolling_rate() =>
         if v >= 0
             total := total + 1
             wins  := wins + v
-    total > 0 ? math.round(wins * 100.0 / total) : 0
+    int rate = total > 0 ? math.round(wins * 100.0 / total) : 0
+    [rate, wins, total]
 
 if us_close_bar and not na(s_hi)
     bool pred_hi  = s_hi > s_lo
@@ -365,7 +368,7 @@ if us_close_bar and not na(s_hi)
             last_win := false
         acc_total := acc_total + 1
 
-hit_rate = f_rolling_rate()
+[hit_rate, roll_wins, roll_n] = f_rolling_rate()
 
 // ─────────────────────────────────────────────────────────────
 // NQ STATS — 9AM HOUR CONTINUATION
@@ -1199,7 +1202,7 @@ candle_size = high - low
 
 if show_ict_judas and not ict_confirmed
     if ict_bull_sweep and not ict_bull_choch and not na(ict_sweep_bar) and bar_index > ict_sweep_bar
-        if close > nz(ict_sweep_c_high, ict_asian_l) and candle_size > atr14 * ict_atr_mult and close > nz(nymoc_price, close * 0.999)
+        if close > nz(ict_sweep_c_high, ict_asian_l) and candle_size > atr14 * ict_atr_mult and (na(nymoc_price) or close > nymoc_price)
             ict_bull_choch  := true
             ict_choch_bar   := bar_index
             ict_choch_price := high
@@ -1208,7 +1211,7 @@ if show_ict_judas and not ict_confirmed
             ict_status      := 3
 
     if ict_bear_sweep and not ict_bear_choch and not na(ict_sweep_bar) and bar_index > ict_sweep_bar
-        if close < nz(ict_sweep_c_low, ict_asian_h) and candle_size > atr14 * ict_atr_mult and close < nz(nymoc_price, close * 1.001)
+        if close < nz(ict_sweep_c_low, ict_asian_h) and candle_size > atr14 * ict_atr_mult and (na(nymoc_price) or close < nymoc_price)
             ict_bear_choch  := true
             ict_choch_bar   := bar_index
             ict_choch_price := low
@@ -1503,6 +1506,8 @@ rl_action_col(a) =>
 
 var int   rl_curr_state  = -1
 var int   rl_curr_action = -1
+var int   rl_curr_conf   = -1   // 0=none, 1=one agrees, 2=both agree
+var int   rl_curr_rth_c  = -1   // 0=inside pRTH, 1=outside+agrees, 2=outside+disagrees
 var float rl_q_long      = na
 var float rl_q_short     = na
 var float rl_q_skip      = na
@@ -1521,10 +1526,14 @@ if ny_open_bar and rl_enabled and pat > 0 and not na(s_tier)
     int rth_c  = rl_rth_ctx(rth_out_prth, rth_above_prth, bias_bull)
     int si     = rl_state_idx(pat, above_mid, conf, rth_c)
     int visits = array.get(rl_visits, si)
-    int action = visits >= rl_min_visits or rl_sess == 0 ? rl_choose_action(si) : (bias_bull ? 0 : 1)
+    // Always use ε-greedy: for low-visit states ε is high → natural exploration;
+    // forcing bias overrides Q-learning and distorts convergence.
+    int action = rl_choose_action(si)
 
     rl_curr_state   := si
     rl_curr_action  := action
+    rl_curr_conf    := conf
+    rl_curr_rth_c   := rth_c
     rl_q_long       := array.get(rl_q, rl_q_idx(si, 0))
     rl_q_short      := array.get(rl_q, rl_q_idx(si, 1))
     rl_q_skip       := array.get(rl_q, rl_q_idx(si, 2))
@@ -1648,7 +1657,7 @@ if show_dashboard and barstate.islast
     color fg_main = dark_theme ? color.new(color.white, 15) : color.new(#111111, 0)
     color fg_dim  = dark_theme ? color.new(color.gray, 20)  : color.new(#666666, 0)
 
-    dash = table.new(position.top_right, 2, 38,
+    dash = table.new(position.top_right, 2, 41,
          bgcolor=bg_main, border_width=1,
          border_color=color.new(color.gray, 75))
 
@@ -1826,6 +1835,22 @@ if show_dashboard and barstate.islast
          text_color=fg_main, text_size=size.tiny, bgcolor=bg_hdr)
     r := r + 1
 
+    // ── Confluence (inputs to RL state) ──
+    string conf_str = rl_curr_conf == 2 ? "2/2 — Both agree" : rl_curr_conf == 1 ? "1/2 — Partial" : rl_curr_conf == 0 ? "0/2 — None" : "—"
+    color  conf_col = rl_curr_conf == 2 ? color.lime : rl_curr_conf == 1 ? color.yellow : rl_curr_conf == 0 ? color.red : fg_dim
+    table.cell(dash, 0, r, "Confluence", text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, rl_enabled and rl_curr_conf >= 0 ? conf_str : "—",
+         text_color=rl_enabled ? conf_col : fg_dim, text_size=size.tiny, bgcolor=bg_row)
+    r := r + 1
+
+    // ── pRTH context ──
+    string rth_ctx_str = rl_curr_rth_c == 0 ? "Inside pRTH" : rl_curr_rth_c == 1 ? "Outside — agrees" : rl_curr_rth_c == 2 ? "Outside — vs bias" : "—"
+    color  rth_ctx_col = rl_curr_rth_c == 1 ? color.lime : rl_curr_rth_c == 2 ? color.orange : fg_dim
+    table.cell(dash, 0, r, "pRTH Ctx",  text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, rl_enabled and rl_curr_rth_c >= 0 ? rth_ctx_str : "—",
+         text_color=rl_enabled ? rth_ctx_col : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
     // ── LIVE SWEEP separator ──
     table.cell(dash, 0, r, "  LIVE SWEEP  ",
          text_color=fg_dim, bgcolor=bg_row, text_size=size.tiny, text_halign=text.align_center)
@@ -1870,7 +1895,7 @@ if show_dashboard and barstate.islast
 
     // ── RTH vs pRTH ──
     table.cell(dash, 0, r, "vs pRTH",  text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
-    string prth_str = not na(prth_h) ? (rth_out_prth ? (rth_above_prth ? "Above  83%" : "Below  83%") : "Inside  73%") : "—"
+    string prth_str = not na(prth_h) ? (rth_out_prth ? (rth_above_prth ? "Above 83.3%" : "Below 83.3%") : "Inside 72.7%") : "—"
     color  prth_c   = not na(prth_h) ? (rth_out_prth ? color.fuchsia : fg_main) : fg_dim
     table.cell(dash, 1, r, prth_str, text_color=prth_c, text_size=size.tiny, bgcolor=bg_hdr)
     r := r + 1
@@ -1894,19 +1919,30 @@ if show_dashboard and barstate.islast
     r := r + 1
 
     // ── Hit rate (excludes both-swept from denominator) ──
+    // Rolling hit rate — counts match the rolling window, not all-time
     int acc_decided = acc_total - acc_both
     color hr_c = hit_rate >= 65 ? color.lime : hit_rate >= 55 ? color.yellow : color.red
-    table.cell(dash, 0, r, "Hit Rate",  text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
-    table.cell(dash, 1, r, show_rolling and acc_decided > 0 ?
-         str.tostring(hit_rate) + "%  (" + str.tostring(acc_wins) + "✓ " + str.tostring(acc_both) + "≈ " + str.tostring(acc_decided - acc_wins) + "✗)" : "—",
+    string hr_label = "L" + str.tostring(rolling_lb) + " Hit Rate"
+    string hr_val = roll_n > 0 ?
+         str.tostring(hit_rate) + "%  (" + str.tostring(roll_wins) + "✓ " + str.tostring(roll_n - roll_wins) + "✗)" : "—"
+    table.cell(dash, 0, r, hr_label,    text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
+    table.cell(dash, 1, r, show_rolling ? hr_val : "—",
          text_color=show_rolling ? hr_c : fg_dim, text_size=size.tiny, bgcolor=bg_hdr)
+    r := r + 1
+
+    // ── All-time (includes both-swept as neutral ≈) ──
+    string at_val = acc_total > 0 ?
+         str.tostring(acc_wins) + "✓ " + str.tostring(acc_both) + "≈ " + str.tostring(acc_decided - acc_wins) + "✗" : "—"
+    table.cell(dash, 0, r, "All-Time",  text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 1, r, show_rolling ? at_val : "—",
+         text_color=fg_main, text_size=size.tiny, bgcolor=bg_row)
     r := r + 1
 
     // ── Streak ──
     color streak_c = streak > 0 ? color.lime : streak < 0 ? color.red : fg_dim
-    table.cell(dash, 0, r, "Streak",    text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_row)
+    table.cell(dash, 0, r, "Streak",    text_color=fg_dim,  text_size=size.tiny, bgcolor=bg_hdr)
     table.cell(dash, 1, r, show_rolling ? str.tostring(math.abs(streak)) + (streak > 0 ? " wins" : " losses") : "—",
-         text_color=streak_c, text_size=size.tiny, bgcolor=bg_row)
+         text_color=streak_c, text_size=size.tiny, bgcolor=bg_hdr)
     r := r + 1
 
 
