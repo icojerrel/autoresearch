@@ -542,11 +542,11 @@ def main():
     # Run all analyses
     sdev_rec          = analyze_sdev(daily)
     ub_act, lb_act    = analyze_ib(hourly)
-    bull_cont, bear_c = analyze_rth_continuation(hourly)
+    bull_cont, bear_cont = analyze_rth_continuation(hourly)
     analyze_dow(daily)
     analyze_monthly(daily)
     analyze_ranges(hourly)
-    print_summary(sdev_rec, ub_act, lb_act, bull_cont, bear_c)
+    print_summary(sdev_rec, ub_act, lb_act, bull_cont, bear_cont)
 
     print("\n  Run with actual data:")
     print("    python3 ndx_analysis.py \\")
