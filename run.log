@@ -1,0 +1,41 @@
+Using CPython 3.10.19 interpreter at: /usr/bin/python3.10
+Creating virtual environment at: .venv
+Downloading nvidia-cuda-nvrtc-cu12 (84.0MiB)
+Downloading sympy (6.0MiB)
+Downloading nvidia-cuda-cupti-cu12 (9.8MiB)
+Downloading nvidia-cusparse-cu12 (274.9MiB)
+Downloading pillow (6.7MiB)
+Downloading nvidia-cublas-cu12 (566.8MiB)
+Downloading nvidia-cudnn-cu12 (674.0MiB)
+Downloading nvidia-cufile-cu12 (1.1MiB)
+Downloading rustbpe (1.0MiB)
+Downloading nvidia-nccl-cu12 (307.4MiB)
+Downloading tiktoken (1.1MiB)
+Downloading matplotlib (8.3MiB)
+Downloading pyarrow (45.4MiB)
+Downloading nvidia-cufft-cu12 (184.2MiB)
+Downloading hf-xet (4.0MiB)
+Downloading triton (162.4MiB)
+Downloading networkx (1.6MiB)
+Downloading nvidia-cusolver-cu12 (255.1MiB)
+Downloading nvidia-cusparselt-cu12 (273.9MiB)
+Downloading nvidia-curand-cu12 (60.7MiB)
+Downloading nvidia-nvjitlink-cu12 (37.4MiB)
+Downloading numpy (16.0MiB)
+Downloading nvidia-nvshmem-cu12 (118.9MiB)
+Downloading pandas (12.2MiB)
+Downloading fonttools (4.6MiB)
+Downloading kiwisolver (1.6MiB)
+ Downloading kiwisolver
+Downloading pygments (1.2MiB)
+ Downloading networkx
+  × Failed to download `torch==2.9.1+cu128`
+  ├─▶ Failed to fetch:
+  │   `https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl`
+  ├─▶ Request failed after 3 retries
+  ├─▶ error sending request for url
+  │   (https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp310-cp310-manylinux_2_28_x86_64.whl)
+  ├─▶ client error (Connect)
+  ╰─▶ tunnel error: unsuccessful
+  help: `torch` (v2.9.1+cu128) was included because `autoresearch` (v0.1.0)
+        depends on `torch`
