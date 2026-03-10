@@ -1,0 +1,3 @@
+commit	val_bpb	memory_gb	status	description
+9264224	0.997900	44.0	keep	baseline (master: depth=8 WARMUP=0.0 no grad clip)
+14ffa7d	-	-	pending	WARMUP=0.05 + grad_clip=1.0 (needs GPU run)
