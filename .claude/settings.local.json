@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git clone:*)",
+      "Bash(git:*)",
+      "mcp__claude-education-skills__fetch_claude_docs",
+      "Bash(find Auto-Claude:*)"
+    ]
+  }
+}

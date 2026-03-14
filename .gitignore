@@ -18,3 +18,90 @@ AGENTS.md
 
 # Experimental code/artifacts
 dev/
+
+# MT5 Data (too large for git)
+data/*.csv
+data/*.h5
+data/*.feather
+experiments/*/
+
+# MT5 Terminal files (local only)
+*.terminal
+*MQL5/Indicators/
+*MQL5/Experts/
+*MQL5/Scripts/
+
+# Experiment results (too large)
+experiments/*/equity_curve.json
+experiments/*/trades_log.json
+experiments/*/plots/
+*.html
+*.png
+*.jpg
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Repo-specific (keep subrepos separate)
+Auto-Claude/.git/
+QuantMuse/.git/
+Scrapling/.git/
+decapod/.git/
+claude-code-continuous-learning-skill/.git/
+orderflowbot-warm/.git/
+vectorbt-backtesting-skills/.git/
+autoresearch/.git/
+
+# But keep subrepo content
+!Auto-Claude/
+!QuantMuse/
+!Scrapling/
+!decapod/
+!claude-code-continuous-learning-skill/
+!orderflowbot-warm/
+!vectorbt-backtesting-skills/
+!autoresearch/
+
+# Cache
+.cache/
+*.cache
+
+# Coverage
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Documentation builds
+docs/_build/
+docs/.doctrees/
+site/

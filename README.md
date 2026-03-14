@@ -1,74 +1,293 @@
-# autoresearch
+# MT5 Strategy Autoresearcher
 
-![teaser](progress.png)
+> Autonomous trading strategy improvement using AI-powered research methodology
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+**Vision:** Apply Andrej Karpathy's autoresearch concept to trading strategies - AI agents that autonomously experiment, test, and improve trading systems on MT5.
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069).
+---
 
-## How it works
+## 🎯 What This Does
 
-The repo is deliberately kept small and only really has a three files that matter:
+Builds a system where AI agents:
+1. **Generate strategy variants** (parameter tweaks, logic changes, combinations)
+2. **Backtest quickly** (VectorBT with MT5 historical data)
+3. **Paper trade for 1 week** (real market conditions, no risk)
+4. **Evaluate automatically** (compound score: Sharpe + Drawdown + Win Rate)
+5. **Keep what works, discard what doesn't** (git-based versioning)
+6. **Learn patterns** (continuous knowledge extraction)
+7. **Repeat** (until improvement plateaus)
 
-- **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
-- **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
-- **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+### The Key Innovation
 
-By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
+Instead of manually tweaking strategies and hoping for the best, this system:
+- Runs 100+ autonomous experiments per strategy
+- Tests each in real market conditions (paper trading)
+- Objectively compares results using standardized metrics
+- Accumulates knowledge about what works
+- Continuously improves baseline performance
 
-## Quick start
+---
 
-**Requirements:** A single NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
+## 📊 Current Status
+
+| Metric | Target | Current |
+|--------|--------|---------|
+| Experiments Run | 100+ | 🔄 Starting |
+| Baseline Sharpe | > 1.5 | TBD |
+| Max Acceptable DD | < 15% | Enforced |
+| Paper Trading Weeks | 52 | 0 |
+| Autonomy Level | 90%+ | Manual → Auto |
+
+**Phase:** 🟡 Foundation | **Confidence:** Growing
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- MT5 Terminal installed
+- Python 3.12+
+- Demo MT5 account (for paper trading)
+
+### Installation
 
 ```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# 1. Install uv project manager (if you don't already have it)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Install dependencies
-uv sync
-
-# 3. Download data and train tokenizer (one-time, ~2 min)
-uv run prepare.py
-
-# 4. Manually run a single training experiment (~5 min)
-uv run train.py
+# Install dependencies
+pip install MetaTrader5 pandas numpy vectorbt plotly
 ```
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+### First Experiment
 
-**Platforms support**. This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. I'm not 100% sure that I want to take this on personally right now. The code is just a demonstration and I don't know how much I'll support it going forward. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions (e.g. a Flash Attention 3 kernels fallback implementation, generic device support, autodetection, etc.), feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
+```bash
+# 1. Connect to MT5 and fetch data
+# (Trigger: "MT5 data ophalen EURUSD")
 
-## Running the agent
+# 2. Run quick backtest
+# (Trigger: "/mt5-backtest ema-crossover EURUSD H1 1000")
 
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
+# 3. Generate strategy variants
+# (Trigger: "/strategy-generator ema-crossover balanced")
 
-```
-Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
-```
-
-The `program.md` file is essentially a super lightweight "skill".
-
-## Project structure
-
-```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-pyproject.toml  — dependencies
+# 4. Start autonomous research
+# (Trigger: "/autoresearch-trading ema-crossover EURUSD 1")
 ```
 
-## Design choices
+---
 
-- **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
-- **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
-- **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
+## 🏗️ Architecture
 
-## Notable forks
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    CONTROL LAYER                             │
+│  Auto-Claude (agents) ←→ decapod (safety) ←→ Learning      │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    RESEARCH LOOP                             │
+│  1. Generate variants (strategy-generator)                  │
+│  2. Quick backtest (mt5-backtest)                           │
+│  3. Paper trading (paper-trading-manager)                   │
+│  4. Evaluate (compound score)                                │
+│  5. Keep/Discard (git versioning)                            │
+│  6. Learn (continuous-learning)                              │
+│  7. Repeat                                                  │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    EXECUTION LAYER                           │
+│  MT5 Terminal (demo) ←→ Paper Trading ←→ Live (future)     │
+└─────────────────────────────────────────────────────────────┘
+```
 
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos)
-- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx)
+---
 
-## License
+## 📁 Project Structure
 
-MIT
+```
+mt5-autoresearcher/
+├── .claude/
+│   └── skills/              # Claude Code skills (auto-activated)
+│       ├── mt5-integration/ # MT5 Python API
+│       ├── autoresearch-trading/  # Main research loop
+│       ├── strategy-generator/     # Variant generation
+│       ├── paper-trading-manager/  # Experiment lifecycle
+│       └── mt5-backtest/           # VectorBT backtesting
+│
+├── docs/                   # Documentation
+│   ├── README.md          # Documentation index
+│   ├── SAMENVATTING.md    # Repository overview
+│   ├── ARCHITECTUUR.md    # System architecture
+│   ├── COMPONENTEN.md    # Reusable components
+│   └── DEPENDENCIES.md   # Install guide
+│
+├── experiments/            # Experiment results (git ignored)
+│
+├── strategy/               # Strategy implementations (to create)
+│
+├── research.md            # Live research log (dynamic!)
+├── SKILLS.md             # Skills reference
+└── README.md             # This file
+```
+
+---
+
+## 🤖 Claude Skills
+
+This project includes 5 specialized Claude Code skills:
+
+### Core Skills
+- **mt5-integration** - MT5 API, data fetching, order execution
+- **autoresearch-trading** - Main research orchestrator
+- **strategy-generator** - AI-powered variant generation
+- **paper-trading-manager** - Experiment lifecycle
+- **mt5-backtest** - Quick backtesting with VectorBT
+
+### How They Work
+Skills auto-activate based on context:
+```
+User: "Test EMA crossover with faster parameters"
+↓
+mt5-backtest skill activates
+↓
+Fetches MT5 data, runs backtest, returns metrics
+```
+
+**See:** [SKILLS.md](SKILLS.md) for complete skill reference
+
+---
+
+## 📚 Documentation
+
+| Document | Description |
+|----------|-------------|
+| [research.md](research.md) | **Live research log** - experiments, insights, decisions |
+| [docs/README.md](docs/README.md) | Documentation index |
+| [docs/SAMENVATTING.md](docs/SAMENVATTING.md) | 8 repositories overview |
+| [docs/ARCHITECTUUR.md](docs/ARCHITECTUUR.md) | Integration patterns |
+| [docs/COMPONENTEN.md](docs/COMPONENTEN.md) | Reusable modules |
+| [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) | Installation guide |
+| [SKILLS.md](SKILLS.md) | Claude skills reference |
+
+---
+
+## 🎯 Research Goals
+
+### Phase 1: Foundation (Weeks 1-4)
+- [ ] MT5 integration working
+- [ ] Baseline EMA strategy backtested
+- [ ] First 10 experiments completed
+- [ ] Auto-Claude generating suggestions
+
+**Milestone:** Fully autonomous experiment loop running
+
+### Phase 2: Optimization (Weeks 5-8)
+- [ ] 100+ experiments completed
+- [ ] Best strategy identified
+- [ ] Paper trading validated (4 weeks)
+- [ ] continuous-learning extracting patterns
+
+**Milestone:** Strategy beats baseline significantly
+
+### Phase 3: Expansion (Weeks 9-12)
+- [ ] Multiple strategies (RSI, Donchian)
+- [ ] Multiple pairs (GBP, JPY)
+- [ ] Ensemble research
+
+**Milestone:** Diversified strategy portfolio
+
+### Phase 4: Live Trading (Week 13+)
+- [ ] Small live test (1% capital)
+- [ ] Performance validation
+- [ ] Scale up gradually
+
+**Milestone:** Profitable live trading
+
+---
+
+## 🔬 Methodology
+
+### The autoresearch Approach
+
+Adapted from [autoresearch](https://github.com/karpathy/autoresearch):
+
+| LLM Research | Trading Research |
+|--------------|-----------------|
+| 5-min training | 1-week paper trading |
+| val_bPB metric | Compound score (Sharpe + DD + Win Rate) |
+| GPU memory | Trading capital |
+| Git commits | Strategy versions |
+
+### Key Metrics
+
+**Primary (for comparison):**
+```python
+score = sharpe_normalized * 0.5 + drawdown_normalized * 0.3 + win_rate * 0.2
+```
+
+**Safety Gates (must pass):**
+- Max DD < 15%
+- Sharpe > 0
+- Min 10 trades
+- Win rate > 30%
+
+---
+
+## 🛡️ Safety
+
+### Risk Management
+- **Paper trading mandatory** before live
+- **Hard position limits** (max 2% equity)
+- **Auto-stop on excessive drawdown** (15%)
+- **Human override** always available
+- **Demo accounts only** for research
+
+### AI Safety
+- **decapod enforcement layers** validate all actions
+- **No autonomous live trading** without approval
+- **Transparent logging** of all decisions
+- **Kill switches** for emergency stops
+
+---
+
+## 🔗 Related Projects
+
+This project integrates code/concepts from:
+
+| Repository | Purpose | Usage |
+|------------|---------|-------|
+| [autoresearch](https://github.com/karpathy/autoresearch) | Methodology inspiration | Research loop pattern |
+| [Auto-Claude](https://github.com/icojerrel/Auto-Claude) | Multi-agent framework | Strategy generation |
+| [decapod](https://github.com/icojerrel/decapod) | Control plane | Safety enforcement |
+| [QuantMuse](https://github.com/icojerrel/QuantMuse) | Trading system | Factor analysis |
+| [vectorbt-backtesting-skills](https://github.com/icojerrel/vectorbt-backtesting-skills) | Backtesting | VectorBT patterns |
+
+---
+
+## 📊 Progress
+
+### Latest Updates
+- **2026-03-14**: Project initialized, documentation created
+- **2026-03-14**: 5 Claude skills created
+- **2026-03-14**: Git repository setup
+- **Pending**: First MT5 connection test
+
+### Next Steps
+1. Open MT5 demo account
+2. Test first data fetch
+3. Run baseline backtest
+4. Start autonomous experiments
+
+---
+
+## 📄 License
+
+MIT License
+
+---
+
+**Happy Autonomous Trading!** 🚀📈
